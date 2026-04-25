@@ -502,7 +502,6 @@ def _configure_logging(level: str = "INFO", log_dir: str = "logs") -> None:
     structlog.configure(
         processors=[
             structlog.stdlib.add_log_level,
-            structlog.stdlib.add_logger_name,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.dev.ConsoleRenderer(),
         ],
