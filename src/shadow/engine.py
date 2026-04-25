@@ -69,6 +69,11 @@ class ShadowBot(ProductionBot):
         # key = trade_id, value = {signal, direction, amount, limit_price, bars_left}
         self._pending_fills: Dict[str, dict] = {}
 
+        # Trade IDs confirmed on the current candle — excluded from exit checks
+        # until the next candle closes, matching real exchange behaviour where a
+        # trailing stop cannot fire in the same bar the order fills.
+        self._new_fills: set = set()
+
         # Separate structlog logger tagged with "shadow" prefix
         self._slog = structlog.get_logger("shadow")
 
@@ -150,6 +155,8 @@ class ShadowBot(ProductionBot):
     # ── Candle hook — check pending fills before signal eval ─────────────────
 
     async def _on_candle_close(self, candle: dict) -> None:
+        # Trades from the previous candle can now be monitored for exits.
+        self._new_fills.clear()
         await self._process_pending_fills(candle)
         # Count pending fills as occupied slots so a second signal can't fire
         # while we're waiting for a limit order to be confirmed.
@@ -277,6 +284,8 @@ class ShadowBot(ProductionBot):
             "stop_loss":   signal.stop_loss,
             "take_profit": signal.take_profit,
         }
+        # Guard: do not evaluate exits until the next candle.
+        self._new_fills.add(trade_id)
 
         self._slog.info(
             "shadow_fill_confirmed",
@@ -303,6 +312,30 @@ class ShadowBot(ProductionBot):
             take_profit=signal.take_profit, size_pct=size_pct,
             grade=signal.grade,
         )
+
+    # ── Shadow position monitor ───────────────────────────────────────────────
+
+    async def _position_monitor_loop(self) -> None:
+        """
+        Same cadence as ProductionBot (every 10 s) but with two corrections:
+          1. Skip trades filled on the current candle (_new_fills guard) so a
+             trailing stop cannot fire in the same bar the order was confirmed.
+          2. Use ticker["last"] for both high and low instead of the 24-hour
+             high/low, which would give the exit logic a misleadingly wide range.
+        """
+        while self._running and not self._kill.triggered:
+            try:
+                for trade_id in list(self._open_trades.keys()):
+                    if trade_id in self._new_fills:
+                        continue
+                    ticker = await self._client.fetch_ticker(self._cfg.trading.symbol)
+                    price = float(ticker["last"])
+                    exit_info = self._adapter.check_exit(trade_id, price, price)
+                    if exit_info:
+                        await self._execute_exit(trade_id, exit_info)
+            except Exception as exc:
+                log.error("shadow_position_monitor_error", error=str(exc))
+            await asyncio.sleep(10)
 
     # ── Shadow exit (no exchange calls) ──────────────────────────────────────
 
