@@ -123,6 +123,33 @@ class AlertNotifier:
         )
         await self._dispatch(text)
 
+    async def send_shadow_report(
+        self,
+        symbol: str,
+        starting_equity: float,
+        current_equity: float,
+        trades_today: int,
+        win_rate: float,
+        total_pnl_pct: float,
+        avg_slippage_bps: float,
+        real_pnl_pct: Optional[float] = None,
+    ) -> None:
+        if not self._cfg.notify_on_pnl:
+            return
+        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        emoji = "🔵" if total_pnl_pct >= 0 else "🟠"
+        lines = [
+            f"{emoji} *SHADOW MODE — DAILY REPORT*  {now_utc}",
+            f"Symbol:   `{symbol}`",
+            f"Equity:   `{current_equity:.2f} USDT`  (`{total_pnl_pct:+.2f}%`)",
+            f"Trades:   `{trades_today}` | Win rate: `{win_rate:.0%}`",
+            f"Avg slip: `{avg_slippage_bps:.1f} bps`",
+        ]
+        if real_pnl_pct is not None:
+            delta = total_pnl_pct - real_pnl_pct
+            lines.append(f"vs Real:  `{real_pnl_pct:+.2f}%`  (delta `{delta:+.2f}%`)")
+        await self._dispatch("\n".join(lines))
+
     async def send_alert(self, message: str) -> None:
         """Generic system alert (kill switch, errors, reconnects)."""
         await self._dispatch(f"⚠️ *ALERT*\n{message}")

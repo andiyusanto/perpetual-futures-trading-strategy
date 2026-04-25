@@ -115,6 +115,21 @@ class RiskConfig(BaseSettings):
     max_open_trades: int = 1          # single-position mode
 
 
+class ShadowConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SHADOW_", env_file=".env", extra="ignore")
+
+    enabled: bool = Field(False, description="Run in shadow mode (no real orders)")
+    symbols: List[str] = Field(
+        default_factory=list,
+        description="Symbols to shadow (comma-separated). Falls back to TRADING_SYMBOL if empty.",
+    )
+    log_level: str = Field("INFO", description="Log level for shadow-specific output")
+    compare_real: bool = Field(False, description="Log divergence when shadow and real signals differ")
+    slippage_bps: float = Field(3.0, description="Simulated slippage in basis points per fill")
+    starting_equity: float = Field(10000.0, description="Simulated starting equity (USDT)")
+    fill_timeout_bars: int = Field(2, description="Bars before unfilled limit order is market-filled")
+
+
 class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -124,6 +139,7 @@ class AppConfig(BaseSettings):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    shadow: ShadowConfig = Field(default_factory=ShadowConfig)
 
     log_level: str = Field("INFO")
     log_dir: str = "logs"

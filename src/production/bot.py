@@ -523,7 +523,15 @@ def _configure_logging(level: str = "INFO", log_dir: str = "logs") -> None:
 def main() -> None:
     cfg = AppConfig()
     _configure_logging(cfg.log_level, cfg.log_dir)
-    bot = ProductionBot(cfg)
+
+    if cfg.shadow.enabled:
+        from src.shadow.engine import ShadowBot
+        _configure_logging(cfg.shadow.log_level, cfg.log_dir)
+        bot: ProductionBot = ShadowBot(cfg)
+        log.info("running_in_shadow_mode", slippage_bps=cfg.shadow.slippage_bps)
+    else:
+        bot = ProductionBot(cfg)
+
     asyncio.run(bot.start())
 
 

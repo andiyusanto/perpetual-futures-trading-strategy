@@ -506,6 +506,93 @@ perpetual-futures-trading-strategy/
 
 ---
 
+## Shadow Mode
+
+Shadow mode runs the complete APFTS v3 strategy pipeline against live market data **without sending any orders to the exchange**. No API key is required for order placement — only public market-data endpoints are used. All decisions are logged to the `shadow_trades` table and a separate log file.
+
+### When to use shadow mode
+- Validate that strategy changes behave as expected before going live
+- Paper-trade a new symbol or parameter set alongside a live position
+- Regression-test after a code change without any financial risk
+
+### Quick start
+
+```bash
+# .env (add these lines — no API key required for market data)
+SHADOW_MODE=true
+SHADOW_STARTING_EQUITY=10000
+SHADOW_SLIPPAGE_BPS=3          # 0.03% simulated slippage per fill
+SHADOW_FILL_TIMEOUT_BARS=2     # bars before limit falls back to market fill
+
+# Run the bot — zero exchange orders will be placed
+apfts-bot
+```
+
+Log output will show `SHADOW_ORDER` and `SHADOW_CLOSE` entries (never `CCXT request`).
+
+### Configuration reference
+
+| Variable | Default | Description |
+|---|---|---|
+| `SHADOW_MODE` | `false` | Enable shadow mode |
+| `SHADOW_STARTING_EQUITY` | `10000` | Simulated USDT equity |
+| `SHADOW_SLIPPAGE_BPS` | `3` | Basis points of adverse slippage per fill |
+| `SHADOW_FILL_TIMEOUT_BARS` | `2` | Bars before unfilled limit order uses market price |
+| `SHADOW_LOG_LEVEL` | `INFO` | Log level for shadow-specific messages |
+| `SHADOW_COMPARE_REAL` | `false` | Log divergence when shadow and real signals differ |
+
+### Database schema
+
+Shadow trades are stored in the `shadow_trades` table (same `data/trades.db`).
+It mirrors the `trades` table with two extra columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `simulated_slippage_bps` | REAL | Slippage applied to this fill |
+| `would_have_executed` | INTEGER | 1 = normal fill, 0 = filtered by shadow rule |
+
+Run the migration once on an existing database:
+```bash
+python scripts/migrate_shadow_trades.py --db-path data/trades.db
+```
+
+### Shadow vs. real comparison report
+
+```bash
+# Last 7 days (default)
+apfts-shadow-report
+
+# Last 30 days, custom DB path
+apfts-shadow-report --days 30 --db-path data/trades.db
+```
+
+Sample output:
+```
+APFTS v3 — Shadow Report  (last 7 days as of 2026-04-25 08:00 UTC)
+
+────────────────────────────────────────────────────────────
+  Period: last 7 days
+────────────────────────────────────────────────────────────
+  Trades                 shadow=14           real=13           delta=+1
+  Win rate               shadow=64.3%        real=61.5%        delta=+2.8%
+  Total PnL%             shadow=+12.740      real=+11.210      delta=+1.530
+  Avg PnL%               shadow=+0.910       real=+0.862       delta=+0.048
+  Best trade             shadow=+3.210       real=+2.980       delta=+0.230
+  Worst trade            shadow=-0.820       real=-0.950       delta=+0.130
+```
+
+### Fill simulation model
+
+| Scenario | Behaviour |
+|---|---|
+| Limit order | Fills at `limit_entry_price` if candle's high/low touches it |
+| Unfilled limit | Falls back to market fill at close after `SHADOW_FILL_TIMEOUT_BARS` |
+| Slippage (entry) | Long: `price × (1 + bps/10000)` / Short: `price × (1 - bps/10000)` |
+| Slippage (SL exit) | Adverse — fill is beyond the stop price by `slippage_bps` |
+| Slippage (TP exit) | Adverse — fill is slightly worse than the TP price |
+
+---
+
 ## Strategy Audit
 
 A full quantitative verification was run against 5 random seeds × 10,000 bars.

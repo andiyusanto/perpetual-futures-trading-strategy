@@ -31,14 +31,15 @@ dev = [
 ]
 
 [project.scripts]
-apfts-backtest   = "src.backtest.engine:main"
-apfts-optimize   = "src.backtest.optimizer:main"
-apfts-bot        = "src.production.bot:main"
-apfts-multi-bot  = "src.production.multi_bot:main"
+apfts-backtest      = "src.backtest.engine:main"
+apfts-optimize      = "src.backtest.optimizer:main"
+apfts-bot           = "src.production.bot:main"
+apfts-multi-bot     = "src.production.multi_bot:main"
+apfts-shadow-report = "scripts.shadow_report:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*", "config*"]
+include = ["src*", "config*", "scripts*"]
 
 [tool.mypy]
 python_version = "3.10"
