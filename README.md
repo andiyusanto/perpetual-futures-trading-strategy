@@ -519,10 +519,10 @@ Shadow mode runs the complete APFTS v3 strategy pipeline against live market dat
 
 ```bash
 # .env (add these lines — no API key required for market data)
-SHADOW_MODE=true
+SHADOW_ENABLED=true
 SHADOW_STARTING_EQUITY=10000
-SHADOW_SLIPPAGE_BPS=3          # 0.03% simulated slippage per fill
-SHADOW_FILL_TIMEOUT_BARS=2     # bars before limit falls back to market fill
+SHADOW_SLIPPAGE_BPS=3
+SHADOW_FILL_TIMEOUT_BARS=2
 
 # Run the bot — zero exchange orders will be placed
 apfts-bot
@@ -534,7 +534,7 @@ Log output will show `SHADOW_ORDER` and `SHADOW_CLOSE` entries (never `CCXT requ
 
 | Variable | Default | Description |
 |---|---|---|
-| `SHADOW_MODE` | `false` | Enable shadow mode |
+| `SHADOW_ENABLED` | `false` | Enable shadow mode |
 | `SHADOW_STARTING_EQUITY` | `10000` | Simulated USDT equity |
 | `SHADOW_SLIPPAGE_BPS` | `3` | Basis points of adverse slippage per fill |
 | `SHADOW_FILL_TIMEOUT_BARS` | `2` | Bars before unfilled limit order uses market price |

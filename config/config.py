@@ -5,9 +5,22 @@ All values can be overridden via environment variables or a .env file.
 
 from __future__ import annotations
 
-from typing import List, Optional
-from pydantic import Field
+import json
+from typing import Any, List, Optional
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _parse_str_list(v: Any) -> Any:
+    """Accept JSON array, comma-separated string, or empty string for List[str] fields."""
+    if not isinstance(v, str):
+        return v
+    v = v.strip()
+    if not v:
+        return []
+    if v.startswith("["):
+        return json.loads(v)
+    return [s.strip() for s in v.split(",") if s.strip()]
 
 
 class NotificationConfig(BaseSettings):
@@ -47,6 +60,12 @@ class TradingConfig(BaseSettings):
         description="Multi-symbol list (comma-separated in env: TRADING_SYMBOLS). "
                     "If non-empty, used by apfts-multi-bot instead of TRADING_SYMBOL.",
     )
+
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def _parse_symbols(cls, v: Any) -> Any:
+        return _parse_str_list(v)
+
     leverage: int = Field(5, description="Leverage multiplier (1-20 recommended)")
     timeframe: str = Field("1m", description="Candle timeframe")
     max_position_pct: float = Field(0.10, description="Max position as fraction of equity")
@@ -123,6 +142,12 @@ class ShadowConfig(BaseSettings):
         default_factory=list,
         description="Symbols to shadow (comma-separated). Falls back to TRADING_SYMBOL if empty.",
     )
+
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def _parse_symbols(cls, v: Any) -> Any:
+        return _parse_str_list(v)
+
     log_level: str = Field("INFO", description="Log level for shadow-specific output")
     compare_real: bool = Field(False, description="Log divergence when shadow and real signals differ")
     slippage_bps: float = Field(3.0, description="Simulated slippage in basis points per fill")
