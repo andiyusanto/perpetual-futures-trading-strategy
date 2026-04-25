@@ -23,6 +23,32 @@ def _parse_str_list(v: Any) -> Any:
     return [s.strip() for s in v.split(",") if s.strip()]
 
 
+def _patch_source_for_comma_lists(source: Any) -> None:
+    """Monkey-patch a pydantic-settings source so List[str] fields accept comma-separated values.
+
+    pydantic-settings calls prepare_field_value → self.decode_complex_value → json.loads() for
+    List fields *before* pydantic validators run.  We replace decode_complex_value on the already-
+    instantiated source instance so the original prepare_field_value still runs (with its allow-
+    parse-failure logic) but delegates to our version for non-JSON strings.
+    """
+    import typing
+    _orig_dcv = source.decode_complex_value  # bound method — self already captured
+
+    def _patched_dcv(field_name: str, field: Any, value: Any) -> Any:
+        if isinstance(value, str):
+            annotation = getattr(field, "annotation", None)
+            origin = getattr(annotation, "__origin__", None)
+            if origin is list:
+                v = value.strip()
+                if not v.startswith("["):
+                    return [s.strip() for s in v.split(",") if s.strip()] if v else []
+        return _orig_dcv(field_name, field, value)
+
+    # Instance attribute shadows the class method; prepare_field_value calls self.decode_complex_value
+    # so it will resolve to _patched_dcv first via normal Python attribute lookup.
+    source.decode_complex_value = _patched_dcv
+
+
 class NotificationConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="NOTIFY_", env_file=".env", extra="ignore")
 
@@ -65,6 +91,12 @@ class TradingConfig(BaseSettings):
     @classmethod
     def _parse_symbols(cls, v: Any) -> Any:
         return _parse_str_list(v)
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):  # type: ignore[override]
+        _patch_source_for_comma_lists(env_settings)
+        _patch_source_for_comma_lists(dotenv_settings)
+        return (init_settings, env_settings, dotenv_settings, file_secret_settings)
 
     leverage: int = Field(5, description="Leverage multiplier (1-20 recommended)")
     timeframe: str = Field("1m", description="Candle timeframe")
@@ -147,6 +179,12 @@ class ShadowConfig(BaseSettings):
     @classmethod
     def _parse_symbols(cls, v: Any) -> Any:
         return _parse_str_list(v)
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):  # type: ignore[override]
+        _patch_source_for_comma_lists(env_settings)
+        _patch_source_for_comma_lists(dotenv_settings)
+        return (init_settings, env_settings, dotenv_settings, file_secret_settings)
 
     log_level: str = Field("INFO", description="Log level for shadow-specific output")
     compare_real: bool = Field(False, description="Log divergence when shadow and real signals differ")
