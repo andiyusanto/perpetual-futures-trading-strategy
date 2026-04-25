@@ -19,18 +19,49 @@ This is a **perpetual futures trading bot** for cryptocurrency exchanges (Binanc
 ## Project Structure
 ```
 perpetual-futures-trading-strategy/
+├── Dockerfile
+├── docker-compose.yml
+├── .dockerignore
+├── pyproject.toml          # pip install -e .
+├── requirements.txt
+├── .env.example
+├── config/
+│   └── config.py           # Pydantic BaseSettings (all config classes)
 ├── src/
-│   ├── exchanges/      # Exchange connectors (Binance, Bybit)
-│   ├── strategies/     # Trading strategies (grid, dca, trend)
-│   ├── risk/          # Risk management (position sizing, stop-loss)
-│   ├── data/          # Data fetching and processing
-│   └── utils/         # Helpers (logging, config, notifications)
-├── tests/             # Unit and integration tests
-├── config/            # Configuration files (exchange keys, params)
-├── scripts/           # Deployment and maintenance scripts
-├── data/              # Historical data storage
-├── logs/              # Trading logs
-└── main.py            # Entry point
+│   ├── core/
+│   │   ├── data_buffer.py  # RingBuffer + MarketDataBuffer
+│   │   ├── volatility.py   # VolatilityClassifier (shared)
+│   │   └── utils.py        # ema, rsi, atr, adx
+│   ├── strategy/
+│   │   ├── signals.py      # SignalEngineV3, FundingVelocitySignal,
+│   │   │                   # OrderBookImbalanceSignal, LiquidationMapper
+│   │   ├── exits.py        # ChandelierExit, MarketStructureSL
+│   │   └── engine.py       # V3StrategyEngine — shared by backtest + production
+│   ├── execution/
+│   │   ├── ccxt_client.py  # Async CCXT wrapper
+│   │   ├── executor.py     # Order submit + retry
+│   │   ├── liquidation_feed.py  # Binance !forceOrder@arr WebSocket
+│   │   └── ws_stream.py    # Binance kline + aggTrade WebSocket
+│   ├── risk/
+│   │   ├── position_sizer.py
+│   │   ├── risk_manager.py # RegimeClassifier
+│   │   ├── kill_switch.py
+│   │   └── funding_carry.py  # FundingCarryManager
+│   ├── backtest/
+│   │   ├── engine.py       # BacktestEngineV3 + synthetic data generator
+│   │   ├── metrics.py      # TradeRecord, BacktestMetrics
+│   │   └── optimizer.py    # WalkForwardOptimizer
+│   ├── notifications/
+│   │   └── notifier.py     # AlertNotifier (Telegram + Discord)
+│   ├── persistence/
+│   │   └── trade_store.py  # TradeStore (aiosqlite)
+│   └── production/
+│       ├── bot.py          # Async production bot
+│       └── multi_bot.py    # Multi-symbol orchestrator
+├── data/                   # SQLite database (volume-mounted in Docker)
+├── logs/                   # Structured log files (volume-mounted in Docker)
+└── tests/
+    └── test_strategy.py
 ```
 
 ## Coding Conventions
