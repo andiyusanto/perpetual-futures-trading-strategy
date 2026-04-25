@@ -281,6 +281,7 @@ class ShadowBot(ProductionBot):
             "direction":   direction,
             "entry_price": actual_entry,
             "amount":      amount,
+            "size_pct":    size_pct,
             "stop_loss":   signal.stop_loss,
             "take_profit": signal.take_profit,
         }
@@ -354,10 +355,11 @@ class ShadowBot(ProductionBot):
         slip_dir  = -direction if is_sl else direction
         actual_exit = _apply_slippage(raw_exit, slip_dir, self._shadow_cfg.slippage_bps)
 
-        if direction > 0:
-            pnl_pct = (actual_exit - trade["entry_price"]) / trade["entry_price"] * 100
-        else:
-            pnl_pct = (trade["entry_price"] - actual_exit) / trade["entry_price"] * 100
+        leverage   = self._cfg.trading.leverage
+        size_pct   = trade.get("size_pct", 0.02)
+        price_move = (actual_exit - trade["entry_price"]) / trade["entry_price"]
+        signed_move = price_move if direction > 0 else -price_move
+        pnl_pct = signed_move * size_pct * leverage * 100
 
         self._capital *= (1 + pnl_pct / 100)
         self._peak_capital = max(self._peak_capital, self._capital)

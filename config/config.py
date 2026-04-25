@@ -98,9 +98,9 @@ class TradingConfig(BaseSettings):
         _patch_source_for_comma_lists(dotenv_settings)
         return (init_settings, env_settings, dotenv_settings, file_secret_settings)
 
-    leverage: int = Field(5, description="Leverage multiplier (1-20 recommended)")
+    leverage: int = Field(3, description="Leverage multiplier — max 3x per position per CLAUDE.md")
     timeframe: str = Field("1m", description="Candle timeframe")
-    max_position_pct: float = Field(0.10, description="Max position as fraction of equity")
+    max_position_pct: float = Field(0.02, description="Max position as fraction of equity — 2% per CLAUDE.md")
     use_websocket: bool = Field(
         False,
         description="Replace 30-second REST candle polling with true WebSocket stream. "
@@ -160,7 +160,7 @@ class RiskConfig(BaseSettings):
 
     max_drawdown_pct: float = Field(15.0)
     max_daily_loss_pct: float = Field(5.0)
-    max_position_size_pct: float = Field(0.10)
+    max_position_size_pct: float = Field(0.02)
     kill_switch_drawdown: float = Field(20.0)
     base_risk_pct: float = 0.01       # fraction of equity risked per trade
     max_open_trades: int = 1          # single-position mode
