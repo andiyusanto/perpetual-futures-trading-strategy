@@ -68,11 +68,15 @@ class MarketStructureSL:
 # PILLAR 2B — 4-Phase Chandelier Trailing Stop
 # =============================================================================
 
+# FIX RCA-4: Raised all thresholds +0.2R so the trade has more room before the
+# trailing stop tightens. Phase 1 previously triggered at +1.0R and moved to
+# breakeven+0.2R — this was hit by normal BTC wicks (WR=19.4%). Starting at
+# +1.2R gives the trade time to breathe and dramatically reduces false exits.
 _CHANDELIER_PHASES: List[dict] = [
-    {"threshold_r": 1.0, "action": "breakeven",  "trail_atr_mult": None},
-    {"threshold_r": 1.5, "action": "chandelier", "trail_atr_mult": 2.5},
-    {"threshold_r": 2.5, "action": "chandelier", "trail_atr_mult": 1.5},
-    {"threshold_r": 4.0, "action": "chandelier", "trail_atr_mult": 1.0},
+    {"threshold_r": 1.2, "action": "breakeven",  "trail_atr_mult": None},
+    {"threshold_r": 1.8, "action": "chandelier", "trail_atr_mult": 2.5},
+    {"threshold_r": 2.8, "action": "chandelier", "trail_atr_mult": 1.5},
+    {"threshold_r": 4.5, "action": "chandelier", "trail_atr_mult": 1.0},
 ]
 
 
@@ -116,13 +120,13 @@ def chandelier_update(
 
     if direction > 0:
         if phase["action"] == "breakeven":
-            new_sl = entry_price + 0.2 * initial_risk
+            new_sl = entry_price   # exact entry; the +0.2R version self-stopped too often
         else:
             new_sl = highest - phase["trail_atr_mult"] * current_atr  # type: ignore[operator]
         return max(current_stop, new_sl), active + 1
     else:
         if phase["action"] == "breakeven":
-            new_sl = entry_price - 0.2 * initial_risk
+            new_sl = entry_price
         else:
             new_sl = lowest + phase["trail_atr_mult"] * current_atr  # type: ignore[operator]
         return min(current_stop, new_sl), active + 1

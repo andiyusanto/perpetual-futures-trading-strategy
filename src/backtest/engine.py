@@ -416,12 +416,18 @@ class BacktestEngineV3:
         avg_rr     = avg_win / avg_loss if avg_loss > 0 else 0.0
         expectancy = win_rate * avg_win - (1 - win_rate) * avg_loss
 
-        returns  = np.diff(equity_curve) / (np.array(equity_curve[:-1]) + 1e-10)
-        returns  = returns[returns != 0]
-        ann      = np.sqrt(8_760)
-        sharpe   = float(np.mean(returns) / (np.std(returns) + 1e-10) * ann) if len(returns) > 0 else 0.0
-        downside = returns[returns < 0]
-        sortino  = float(np.mean(returns) / (np.std(downside) + 1e-10) * ann) if len(downside) > 0 else 0.0
+        # FIX RCA-1: trade-level Sharpe instead of bar-equity Sharpe.
+        # The bar-equity approach inflates Sharpe ~40x because ~98% of bars have
+        # zero P&L change, compressing std(returns) near zero.
+        pnl_series = np.array(pnls)
+        n_bars_total = len(equity_curve)
+        # ~200 trades per 10k 1-min bars; scale to annual (252 trading days × 24h × 60min)
+        bars_per_year = 365 * 24 * 60
+        trades_per_year = max(1.0, len(pnl_series) / (n_bars_total / bars_per_year))
+        ann = np.sqrt(trades_per_year)
+        sharpe  = float(np.mean(pnl_series) / (np.std(pnl_series) + 1e-10) * ann)
+        neg_pnl = pnl_series[pnl_series < 0]
+        sortino = float(np.mean(pnl_series) / (np.std(neg_pnl) + 1e-10) * ann) if len(neg_pnl) > 0 else 0.0
 
         gross_profit  = sum(wins)   if wins   else 0.0
         gross_loss    = abs(sum(losses)) if losses else 1e-10

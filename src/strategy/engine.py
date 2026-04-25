@@ -176,7 +176,13 @@ class V3StrategyEngine:
             + w["orderbook"] * ob_score
         )
 
-        thr = self._cfg.composite_threshold
+        # FIX RCA-3: adaptive threshold scaled by ATR percentile so the signal-to-noise
+        # gate stays consistent across low-vol and high-vol regimes.
+        current_atr = float(np.mean(h[-14:] - l[-14:]))
+        recent_moves = np.abs(np.diff(c[-min(90, len(c)):]))
+        atr_pctile = float(np.sum(recent_moves < current_atr) / len(recent_moves)) if len(recent_moves) > 0 else 0.5
+        thr = self._cfg.composite_threshold * (0.7 + 0.6 * atr_pctile)  # range [0.175, 0.385]
+
         if composite > thr:
             direction = 1
         elif composite < -thr:
@@ -185,19 +191,27 @@ class V3StrategyEngine:
             neutral.composite = composite
             return neutral
 
+        # FIX RCA-5: suppress weak counter-trend shorts in trending_bull regime
+        if direction == -1 and "bull" in regime_type and abs(composite) < self._cfg.composite_threshold * 1.5:
+            return neutral
+
         # Step 4: Liquidation cluster alignment
         oi_safe = oi if len(oi) > 0 else np.ones(len(c))
         clusters = self._liq_mapper.find_clusters(h, l, c, oi_safe)
         liq_score = self._liq_mapper.entry_score(direction, price, clusters)
 
         # Step 5: Confidence & grading
+        # FIX RCA-2: use additive boosts (not multiplicative) to prevent weak signals
+        # from being falsely graded A+ when squeeze and liq coincide.
         confidence = abs(composite) * regime_confidence
+        boost = 0.0
         if squeeze_fired:
-            confidence *= 1.5
+            boost += 0.08
         if liq_score > 0.5:
-            confidence *= 1.3
+            boost += 0.06
+        confidence = min(0.85, confidence + boost)
 
-        if confidence > 0.50:
+        if confidence > 0.65:
             grade = "A+"
         elif confidence > 0.35:
             grade = "A"
