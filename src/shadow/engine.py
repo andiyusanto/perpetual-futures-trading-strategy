@@ -326,14 +326,14 @@ class ShadowBot(ProductionBot):
         """
         while self._running and not self._kill.triggered:
             try:
-                for trade_id in list(self._open_trades.keys()):
-                    if trade_id in self._new_fills:
-                        continue
+                eligible = [t for t in list(self._open_trades) if t not in self._new_fills]
+                if eligible:
                     ticker = await self._client.fetch_ticker(self._cfg.trading.symbol)
                     price = float(ticker["last"])
-                    exit_info = self._adapter.check_exit(trade_id, price, price)
-                    if exit_info:
-                        await self._execute_exit(trade_id, exit_info)
+                    for trade_id in eligible:
+                        exit_info = self._adapter.check_exit(trade_id, price, price)
+                        if exit_info:
+                            await self._execute_exit(trade_id, exit_info)
             except Exception as exc:
                 log.error("shadow_position_monitor_error", error=str(exc))
             await asyncio.sleep(10)
@@ -350,10 +350,13 @@ class ShadowBot(ProductionBot):
         raw_exit   = float(exit_info["exit_price"])
         reason     = exit_info["reason"]
 
-        # For stop-loss exits slippage is adverse (fill beyond the stop)
-        is_sl     = "stop_loss" in reason or "trail_phase" in reason
-        slip_dir  = -direction if is_sl else direction
-        actual_exit = _apply_slippage(raw_exit, slip_dir, self._shadow_cfg.slippage_bps)
+        # SL/trail exits: adverse slippage (market order fills past the stop).
+        # TP/funding exits: limit order fills at exact price — no slippage.
+        is_sl = "stop_loss" in reason or "trail_phase" in reason
+        if is_sl:
+            actual_exit = _apply_slippage(raw_exit, -direction, self._shadow_cfg.slippage_bps)
+        else:
+            actual_exit = raw_exit
 
         leverage   = self._cfg.trading.leverage
         size_pct   = trade.get("size_pct", 0.02)
