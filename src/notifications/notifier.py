@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
@@ -60,9 +60,13 @@ class AlertNotifier:
     ) -> None:
         if not self._cfg.notify_on_trade:
             return
+        _wib = timezone(timedelta(hours=7))
+        _now = datetime.now(timezone.utc)
+        now_utc = f"{_now.strftime('%Y-%m-%d %H:%M:%S UTC')} / {_now.astimezone(_wib).strftime('%H:%M:%S WIB')}"
         risk_r = abs(take_profit - entry) / max(abs(entry - stop_loss), 1e-10)
         text = (
             f"🟢 *POSITION OPENED*\n"
+            f"Time:   `{now_utc}`\n"
             f"Symbol: `{symbol}`\n"
             f"Direction: `{direction}` | Grade: `{grade}`\n"
             f"Entry: `{entry:.4f}`\n"
@@ -86,9 +90,13 @@ class AlertNotifier:
     ) -> None:
         if not self._cfg.notify_on_trade:
             return
+        _wib = timezone(timedelta(hours=7))
+        _now = datetime.now(timezone.utc)
+        now_utc = f"{_now.strftime('%Y-%m-%d %H:%M:%S UTC')} / {_now.astimezone(_wib).strftime('%H:%M:%S WIB')}"
         emoji = "🟢" if pnl_pct >= 0 else "🔴"
         text = (
             f"{emoji} *POSITION CLOSED*\n"
+            f"Time:   `{now_utc}`\n"
             f"Symbol: `{symbol}`\n"
             f"Direction: `{direction}` | Reason: `{reason}`\n"
             f"Entry:  `{entry:.4f}`\n"

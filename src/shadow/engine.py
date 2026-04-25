@@ -151,6 +151,10 @@ class ShadowBot(ProductionBot):
 
     async def _on_candle_close(self, candle: dict) -> None:
         await self._process_pending_fills(candle)
+        # Count pending fills as occupied slots so a second signal can't fire
+        # while we're waiting for a limit order to be confirmed.
+        if len(self._pending_fills) + len(self._open_trades) >= self._cfg.risk.max_open_trades:
+            return
         await super()._on_candle_close(candle)
 
     async def _process_pending_fills(self, candle: dict) -> None:
@@ -183,9 +187,10 @@ class ShadowBot(ProductionBot):
                 else:
                     continue  # still waiting
 
+            size_pct = pending["size_pct"]
             del self._pending_fills[trade_id]
             await self._confirm_shadow_fill(
-                trade_id, signal, direction, amount, fill_price
+                trade_id, signal, direction, amount, fill_price, size_pct
             )
 
     # ── Shadow entry (no exchange calls) ─────────────────────────────────────
@@ -254,6 +259,7 @@ class ShadowBot(ProductionBot):
         direction: int,
         amount: float,
         raw_fill_price: float,
+        size_pct: float,
     ) -> None:
         """Apply slippage, register position, and persist."""
         actual_entry = _apply_slippage(raw_fill_price, direction, self._shadow_cfg.slippage_bps)
@@ -263,8 +269,6 @@ class ShadowBot(ProductionBot):
             trade_id, direction, actual_entry,
             signal.initial_risk, signal.stop_loss, signal.take_profit,
         )
-        pending     = self._pending_fills.get(trade_id)  # already deleted by caller
-        size_pct    = pending["size_pct"] if pending else 0.0
 
         self._open_trades[trade_id] = {
             "direction":   direction,

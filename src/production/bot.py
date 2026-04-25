@@ -501,29 +501,53 @@ def _configure_logging(level: str = "INFO", log_dir: str = "logs") -> None:
 
     int_level = getattr(logging, level.upper(), logging.INFO)
 
+    # Processors shared by structlog events and foreign (stdlib) log records
+    shared_processors = [
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso"),
+    ]
+
+    # Bridge structlog through stdlib so events flow to all stdlib handlers
     structlog.configure(
         processors=[
-            structlog.stdlib.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
+            *shared_processors,
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=False,
+    )
+
+    formatter = structlog.stdlib.ProcessorFormatter(
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
             structlog.dev.ConsoleRenderer(),
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(int_level),
-        logger_factory=structlog.PrintLoggerFactory(),
+        foreign_pre_chain=shared_processors,
     )
 
     root = logging.getLogger()
     root.setLevel(int_level)
 
-    # Add file handler only once — avoid duplicates on repeated calls
+    # Console handler — add only once
+    has_console = any(
+        type(h) is logging.StreamHandler
+        for h in root.handlers
+    )
+    if not has_console:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(formatter)
+        root.addHandler(console_handler)
+
+    # File handler — add only once
     log_path = f"{log_dir}/bot.log"
     if not any(
         isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_path)
         for h in root.handlers
     ):
         file_handler = logging.FileHandler(log_path, mode="a")
-        file_handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s — %(message)s")
-        )
+        file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
 
 
