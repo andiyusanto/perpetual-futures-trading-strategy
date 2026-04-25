@@ -29,12 +29,9 @@ log = structlog.get_logger(__name__)
 
 class MultiSymbolBot:
     """
-    Instantiates one ProductionBot per symbol and runs them concurrently
-    via asyncio.gather().
-
-    Each bot connects to the same exchange with the same credentials but
-    operates in complete isolation — separate buffers, engines, kill-switches,
-    and position trackers.
+    Instantiates one bot per symbol and runs them concurrently via asyncio.gather().
+    Uses ShadowBot when SHADOW_ENABLED=true, ProductionBot otherwise.
+    Each bot operates in complete isolation — separate buffers, engines, and trackers.
     """
 
     def __init__(self, cfg: AppConfig) -> None:
@@ -43,10 +40,15 @@ class MultiSymbolBot:
         if not symbols:
             raise ValueError("No symbols configured. Set TRADING_SYMBOLS or TRADING_SYMBOL in .env")
 
+        if cfg.shadow.enabled:
+            from src.shadow.engine import ShadowBot
+            BotClass = ShadowBot
+            log.info("multi_bot_shadow_mode", slippage_bps=cfg.shadow.slippage_bps)
+        else:
+            BotClass = ProductionBot
+
         self._bots: List[ProductionBot] = []
         for sym in symbols:
-            # Build a per-symbol TradingConfig by overriding only the symbol field.
-            # Pydantic v2 model_copy(update=...) performs a shallow merge.
             tc = TradingConfig(
                 symbol=sym,
                 leverage=cfg.trading.leverage,
@@ -57,14 +59,19 @@ class MultiSymbolBot:
                 symbols=cfg.trading.symbols,
             )
             sym_cfg = cfg.model_copy(update={"trading": tc})
-            self._bots.append(ProductionBot(sym_cfg))
+            self._bots.append(BotClass(sym_cfg))
 
         log.info("multi_bot_init", n_symbols=len(self._bots), symbols=symbols)
 
     async def start(self) -> None:
         log.info("multi_bot_starting", n_symbols=len(self._bots))
-        await asyncio.gather(*[bot.start() for bot in self._bots],
-                             return_exceptions=True)
+        results = await asyncio.gather(
+            *[bot.start() for bot in self._bots],
+            return_exceptions=True,
+        )
+        for sym, result in zip([b._cfg.trading.symbol for b in self._bots], results):
+            if isinstance(result, BaseException):
+                log.error("bot_crashed", symbol=sym, error=str(result), exc_info=result)
 
 
 def main() -> None:
