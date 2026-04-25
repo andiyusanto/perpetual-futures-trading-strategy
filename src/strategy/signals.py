@@ -12,12 +12,97 @@ Each signal returns a float on [-1, +1].
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
+import time
+from collections import deque
+from typing import TYPE_CHECKING, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from src.core.utils import ema, compute_rsi
 from src.core.volatility import VolatilityPhase
+
+if TYPE_CHECKING:
+    from src.execution.liquidation_feed import LiquidationEvent
+
+
+# =============================================================================
+# PILLAR 1A — Order Book Imbalance (5th orthogonal signal)
+# =============================================================================
+
+
+class OrderBookImbalanceSignal:
+    """
+    Level-2 bid-ask pressure signal.
+
+    Orthogonality rationale: order book depth is derived from resting limit
+    orders — a completely separate dataset from traded price, volume, or
+    funding rate.  Heavy bid-side depth → short-sellers are absorbing bids →
+    bullish.  Heavy ask-side depth → buyers are absorbing asks → bearish.
+
+    Two components:
+      1. Weighted imbalance — proximity-weighted (level 1 counts more than 20).
+         Captures the aggregate lean of resting liquidity.
+      2. Wall detection — a single level that is >30% of total side volume
+         often acts as a magnet or repulsion level for price.
+
+    Returns signal in [-1, +1]:
+      +1 = strong bid pressure (bullish)
+      -1 = strong ask pressure (bearish)
+       0 = balanced / no data
+    """
+
+    def __init__(self, levels: int = 20, wall_threshold: float = 0.30) -> None:
+        self.levels = levels
+        self.wall_threshold = wall_threshold
+
+    def compute(
+        self,
+        bids: List[List[float]],
+        asks: List[List[float]],
+    ) -> Tuple[float, float, float]:
+        """
+        Parameters
+        ----------
+        bids : [[price, qty], ...]  sorted descending (best bid first)
+        asks : [[price, qty], ...]  sorted ascending  (best ask first)
+
+        Returns
+        -------
+        (signal, bid_pressure, ask_pressure)
+        """
+        if not bids or not asks:
+            return 0.0, 0.0, 0.0
+
+        n = min(self.levels, len(bids), len(asks))
+        if n == 0:
+            return 0.0, 0.0, 0.0
+
+        weights = np.array([1.0 / (i + 1) for i in range(n)])
+
+        bid_vols = np.array([float(bids[i][1]) for i in range(n)])
+        ask_vols = np.array([float(asks[i][1]) for i in range(n)])
+
+        w_bid = float(np.dot(bid_vols, weights))
+        w_ask = float(np.dot(ask_vols, weights))
+
+        # Core imbalance on [-1, +1]
+        imbalance = (w_bid - w_ask) / (w_bid + w_ask + 1e-10)
+
+        # Wall bonus/penalty
+        total_bid = float(np.sum(bid_vols))
+        total_ask = float(np.sum(ask_vols))
+        bid_wall = float(np.max(bid_vols)) / (total_bid + 1e-10) > self.wall_threshold
+        ask_wall = float(np.max(ask_vols)) / (total_ask + 1e-10) > self.wall_threshold
+
+        if bid_wall and not ask_wall:
+            wall_adj = 0.25
+        elif ask_wall and not bid_wall:
+            wall_adj = -0.25
+        else:
+            wall_adj = 0.0
+
+        signal = float(np.clip(imbalance * 1.5 + wall_adj, -1.0, 1.0))
+        return signal, w_bid, w_ask
 
 
 # =============================================================================
@@ -81,7 +166,16 @@ class FundingVelocitySignal:
 
 class LiquidationMapper:
     """
-    Estimates liquidation cluster locations from swing points + OI changes.
+    Locates liquidation cluster prices from two complementary sources:
+
+    1. OI-model estimate (always available):
+       Swing-point analysis + open-interest change magnitude.  Works in
+       backtest and when live_liq_feed is disabled.
+
+    2. Real exchange data (when live_liq_feed=True):
+       Actual forceOrder events from the Binance !forceOrder@arr WebSocket.
+       Passed in via the `live_events` parameter.  These dominate the OI
+       estimate when present because they are factual, not modelled.
 
     Entry alignment logic:
       LONG  → want a short-liq cluster above (cascade will pull price up)
@@ -95,10 +189,45 @@ class LiquidationMapper:
         close: np.ndarray,
         oi: np.ndarray,
         lookback: int = 50,
+        live_events: Optional[Deque["LiquidationEvent"]] = None,
+        live_lookback_ms: int = 300_000,
     ) -> Dict[str, object]:
-        n = len(close)
         price = float(close[-1])
+        n = len(close)
 
+        # ── Path A: real liquidation events ───────────────────────────────────
+        if live_events is not None and len(live_events) > 0:
+            cutoff = int(time.time() * 1000) - live_lookback_ms
+
+            long_liq_prices: List[float] = []   # long positions that were liquidated
+            short_liq_prices: List[float] = []  # short positions that were liquidated
+            long_density = 0.0
+            short_density = 0.0
+
+            for ev in live_events:
+                if ev.timestamp < cutoff:
+                    continue
+                if ev.side == "LONG_LIQ":
+                    long_liq_prices.append(ev.price)
+                    long_density += ev.usd_value
+                else:
+                    short_liq_prices.append(ev.price)
+                    short_density += ev.usd_value
+
+            nearest_long = float(max(long_liq_prices)) if long_liq_prices else price * 0.95
+            nearest_short = float(min(short_liq_prices)) if short_liq_prices else price * 1.05
+
+            return {
+                "long_liq": long_liq_prices,
+                "short_liq": short_liq_prices,
+                "nearest_long": nearest_long,
+                "nearest_short": nearest_short,
+                "long_density": long_density / 1e6,    # normalise to millions USD
+                "short_density": short_density / 1e6,
+                "source": "live",
+            }
+
+        # ── Path B: OI-model estimate (backtest / REST-only mode) ─────────────
         if n < lookback:
             return {
                 "long_liq": [],
@@ -107,13 +236,14 @@ class LiquidationMapper:
                 "nearest_short": price * 1.05,
                 "long_density": 0.0,
                 "short_density": 0.0,
+                "source": "model",
             }
 
         rh = high[-lookback:]
         rl = low[-lookback:]
 
-        swing_highs: list[float] = []
-        swing_lows: list[float] = []
+        swing_highs: List[float] = []
+        swing_lows: List[float] = []
         for i in range(2, len(rh) - 2):
             if rh[i] > rh[i-1] and rh[i] > rh[i-2] and rh[i] > rh[i+1] and rh[i] > rh[i+2]:
                 swing_highs.append(float(rh[i]))
@@ -137,6 +267,7 @@ class LiquidationMapper:
             "nearest_short": nearest_short,
             "long_density": density,
             "short_density": density,
+            "source": "model",
         }
 
     def entry_score(self, direction: int, price: float, clusters: Dict[str, object]) -> float:
@@ -287,13 +418,28 @@ class SignalEngineV3:
 
         return float(np.clip(0.6 * cvd_score + 0.4 * imb, -1, 1))
 
-    def get_regime_weights(self, regime_type: str) -> Dict[str, float]:
-        """Four-signal weight lookup keyed by regime name substring."""
+    def get_regime_weights(
+        self, regime_type: str, ob_available: bool = False
+    ) -> Dict[str, float]:
+        """
+        Five-signal weight lookup keyed by regime name substring.
+
+        When ob_available=False (backtest / no L2 feed), the orderbook weight
+        is zeroed out and the remaining weights are renormalised to sum to 1.0
+        so the composite threshold behaves identically to 4-signal mode.
+        """
         if "trending" in regime_type:
-            return {"trend": 0.40, "momentum": 0.25, "orderflow": 0.15, "funding": 0.20}
+            w = {"trend": 0.32, "momentum": 0.22, "orderflow": 0.14, "funding": 0.17, "orderbook": 0.15}
         elif "mean" in regime_type:
-            return {"trend": 0.10, "momentum": 0.35, "orderflow": 0.30, "funding": 0.25}
+            w = {"trend": 0.08, "momentum": 0.28, "orderflow": 0.24, "funding": 0.20, "orderbook": 0.20}
         elif "high_vol" in regime_type or "volatility" in regime_type:
-            return {"trend": 0.20, "momentum": 0.20, "orderflow": 0.35, "funding": 0.25}
+            w = {"trend": 0.14, "momentum": 0.16, "orderflow": 0.28, "funding": 0.20, "orderbook": 0.22}
         else:
-            return {"trend": 0.25, "momentum": 0.25, "orderflow": 0.30, "funding": 0.20}
+            w = {"trend": 0.20, "momentum": 0.20, "orderflow": 0.24, "funding": 0.18, "orderbook": 0.18}
+
+        if not ob_available:
+            w["orderbook"] = 0.0
+            total = sum(w.values())
+            w = {k: v / total for k, v in w.items()}
+
+        return w

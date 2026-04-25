@@ -1,0 +1,78 @@
+"""
+Multi-symbol orchestrator.
+
+Runs one independent ProductionBot per symbol concurrently.
+Each bot has its own strategy engine, data buffer, and position tracker.
+All bots share the same exchange credentials and risk config from .env.
+
+Usage:
+    apfts-multi-bot                          # reads TRADING_SYMBOLS from .env
+    TRADING_SYMBOLS=BTC/USDT:USDT,ETH/USDT:USDT apfts-multi-bot
+
+.env example:
+    TRADING_SYMBOLS=BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import List
+
+import structlog
+
+from config.config import AppConfig, TradingConfig
+from src.production.bot import ProductionBot, _configure_logging
+
+log = structlog.get_logger(__name__)
+
+
+class MultiSymbolBot:
+    """
+    Instantiates one ProductionBot per symbol and runs them concurrently
+    via asyncio.gather().
+
+    Each bot connects to the same exchange with the same credentials but
+    operates in complete isolation — separate buffers, engines, kill-switches,
+    and position trackers.
+    """
+
+    def __init__(self, cfg: AppConfig) -> None:
+        symbols: List[str] = list(cfg.trading.symbols) if cfg.trading.symbols else [cfg.trading.symbol]
+
+        if not symbols:
+            raise ValueError("No symbols configured. Set TRADING_SYMBOLS or TRADING_SYMBOL in .env")
+
+        self._bots: List[ProductionBot] = []
+        for sym in symbols:
+            # Build a per-symbol TradingConfig by overriding only the symbol field.
+            # Pydantic v2 model_copy(update=...) performs a shallow merge.
+            tc = TradingConfig(
+                symbol=sym,
+                leverage=cfg.trading.leverage,
+                timeframe=cfg.trading.timeframe,
+                max_position_pct=cfg.trading.max_position_pct,
+                use_websocket=cfg.trading.use_websocket,
+                live_liq_feed=cfg.trading.live_liq_feed,
+                symbols=cfg.trading.symbols,
+            )
+            sym_cfg = cfg.model_copy(update={"trading": tc})
+            self._bots.append(ProductionBot(sym_cfg))
+
+        log.info("multi_bot_init", n_symbols=len(self._bots), symbols=symbols)
+
+    async def start(self) -> None:
+        log.info("multi_bot_starting", n_symbols=len(self._bots))
+        await asyncio.gather(*[bot.start() for bot in self._bots],
+                             return_exceptions=True)
+
+
+def main() -> None:
+    cfg = AppConfig()
+    _configure_logging(cfg.log_level, cfg.log_dir)
+    bot = MultiSymbolBot(cfg)
+    asyncio.run(bot.start())
+
+
+if __name__ == "__main__":
+    main()

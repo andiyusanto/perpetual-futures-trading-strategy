@@ -1,0 +1,59 @@
+version: "3.9"
+
+# ── Services ───────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Single-symbol bot (default) ────────────────────────────────────────────
+  apfts-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: apfts:latest
+    container_name: apfts-bot
+    restart: unless-stopped
+    command: ["apfts-bot"]
+    env_file: .env
+    volumes:
+      - ./data:/app/data          # SQLite trade database
+      - ./logs:/app/logs          # Structured log files
+    healthcheck:
+      test: ["CMD", "python", "-c", "from src.strategy.engine import V3StrategyEngine; print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ── Multi-symbol bot (uncomment to use instead of apfts-bot) ───────────────
+  # apfts-multi-bot:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #     target: runtime
+  #   image: apfts:latest
+  #   container_name: apfts-multi-bot
+  #   restart: unless-stopped
+  #   command: ["apfts-multi-bot"]
+  #   env_file: .env
+  #   volumes:
+  #     - ./data:/app/data
+  #     - ./logs:/app/logs
+
+  # ── Watchtower: auto-pull + restart on new image ────────────────────────────
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: apfts-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_POLL_INTERVAL=300        # check every 5 minutes
+      - WATCHTOWER_CLEANUP=true             # remove old images
+      - WATCHTOWER_INCLUDE_STOPPED=false
+    command: apfts-bot                      # watch only the bot container

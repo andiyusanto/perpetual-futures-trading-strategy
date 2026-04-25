@@ -5,9 +5,27 @@ All values can be overridden via environment variables or a .env file.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class NotificationConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="NOTIFY_", env_file=".env", extra="ignore")
+
+    telegram_token: str = Field("", description="Telegram Bot API token")
+    telegram_chat_id: str = Field("", description="Telegram chat/channel ID")
+    discord_webhook_url: str = Field("", description="Discord webhook URL")
+    notify_on_trade: bool = Field(True, description="Alert on every open/close")
+    notify_on_pnl: bool = Field(True, description="Send daily PnL report")
+    daily_report_hour_utc: int = Field(0, description="UTC hour for daily report (0-23)")
+
+
+class DatabaseConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="DB_", env_file=".env", extra="ignore")
+
+    enabled: bool = Field(True, description="Persist trades to SQLite")
+    db_path: str = Field("data/trades.db", description="SQLite file path")
 
 
 class ExchangeConfig(BaseSettings):
@@ -23,10 +41,25 @@ class ExchangeConfig(BaseSettings):
 class TradingConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TRADING_", env_file=".env", extra="ignore")
 
-    symbol: str = Field("BTC/USDT:USDT", description="Trading pair in CCXT format")
+    symbol: str = Field("BTC/USDT:USDT", description="Primary trading pair in CCXT format")
+    symbols: List[str] = Field(
+        default_factory=list,
+        description="Multi-symbol list (comma-separated in env: TRADING_SYMBOLS). "
+                    "If non-empty, used by apfts-multi-bot instead of TRADING_SYMBOL.",
+    )
     leverage: int = Field(5, description="Leverage multiplier (1-20 recommended)")
     timeframe: str = Field("1m", description="Candle timeframe")
     max_position_pct: float = Field(0.10, description="Max position as fraction of equity")
+    use_websocket: bool = Field(
+        False,
+        description="Replace 30-second REST candle polling with true WebSocket stream. "
+                    "Binance USDM only. Reduces entry latency from ~30 s to ~50 ms.",
+    )
+    live_liq_feed: bool = Field(
+        False,
+        description="Subscribe to !forceOrder@arr WebSocket for real liquidation events "
+                    "instead of estimating clusters from OI changes. Binance USDM only.",
+    )
 
 
 class StrategyConfig(BaseSettings):
@@ -65,6 +98,11 @@ class StrategyConfig(BaseSettings):
     volume_ma_bars: int = 720
     volume_min_ratio: float = 0.30
 
+    # Funding carry management
+    carry_threshold: float = 0.0005       # min |FR| to activate carry logic (0.05%)
+    carry_hold_minutes: int = 30          # hold window before funding settlement
+    carry_exit_minutes: int = 15          # early-exit window before unfavourable funding
+
 
 class RiskConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -84,6 +122,8 @@ class AppConfig(BaseSettings):
     trading: TradingConfig = Field(default_factory=TradingConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
+    notifications: NotificationConfig = Field(default_factory=NotificationConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
     log_level: str = Field("INFO")
     log_dir: str = "logs"

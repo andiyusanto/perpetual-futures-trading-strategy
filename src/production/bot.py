@@ -13,6 +13,7 @@ import logging
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 import structlog
@@ -21,6 +22,10 @@ from config.config import AppConfig
 from src.core.data_buffer import MarketDataBuffer
 from src.execution.ccxt_client import CCXTClient
 from src.execution.executor import OrderExecutor
+from src.execution.liquidation_feed import LiquidationFeed
+from src.execution.ws_stream import BinanceCandleStream
+from src.notifications.notifier import AlertNotifier
+from src.persistence.trade_store import TradeRecord, TradeStore
 from src.risk.kill_switch import KillSwitch
 from src.risk.position_sizer import PositionSizer, SignalType, TradeSignal
 from src.risk.risk_manager import MarketRegime, RegimeClassifier
@@ -117,11 +122,19 @@ class ProductionBot:
         )
         self._kill.on_shutdown(self._shutdown)
 
+        self._notifier = AlertNotifier(cfg.notifications)
+        self._store    = TradeStore(cfg.database)
+
         self._open_trades: Dict[str, dict] = {}
         self._capital: float = 0.0
+        self._start_capital: float = 0.0          # for daily report
         self._peak_capital: float = 0.0
         self._running = False
         self._last_candle_ts: int = 0
+
+        # Optional improvements (activated via config flags)
+        self._ws_stream: Optional[BinanceCandleStream] = None
+        self._liq_feed: Optional[LiquidationFeed] = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -132,8 +145,12 @@ class ProductionBot:
         balance = await self._client.fetch_balance()
         usdt = balance.get("USDT", {})
         self._capital = float(usdt.get("free", 0.0))
+        self._start_capital = self._capital
         self._peak_capital = self._capital
         self._kill.initialise(self._capital)
+
+        await self._notifier.start()
+        await self._store.connect()
 
         log.info("bot_started",
                  symbol=self._cfg.trading.symbol,
@@ -141,15 +158,49 @@ class ProductionBot:
                  leverage=self._cfg.trading.leverage)
 
         self._running = True
-        await asyncio.gather(
-            self._candle_loop(),
+
+        tasks = [
             self._funding_oi_loop(),
             self._position_monitor_loop(),
-        )
+            self._daily_report_loop(),
+        ]
+
+        if self._cfg.trading.use_websocket:
+            # WebSocket stream replaces the 30-second REST candle polling loop.
+            # on_candle fires synchronously in the WS receive loop — wrap in
+            # asyncio.create_task so heavy signal work doesn't block the stream.
+            self._ws_stream = BinanceCandleStream(
+                symbol=self._cfg.trading.symbol,
+                timeframe=self._cfg.trading.timeframe,
+                on_candle=self._on_ws_candle,
+                on_tick=self._adapter.feed_trade,
+            )
+            tasks.append(self._ws_stream.run())
+            log.info("ws_stream_enabled", symbol=self._cfg.trading.symbol)
+        else:
+            tasks.append(self._candle_loop())
+
+        if self._cfg.trading.live_liq_feed:
+            self._liq_feed = LiquidationFeed(
+                symbols={self._cfg.trading.symbol},
+            )
+            # Wire events into MarketDataBuffer so V3StrategyEngine can read them
+            self._liq_feed.register_callback(self._adapter._buf.update_liquidation)
+            tasks.append(self._liq_feed.run())
+            log.info("live_liq_feed_enabled")
+
+        tasks.append(self._orderbook_loop())
+
+        await asyncio.gather(*tasks)
 
     async def _shutdown(self) -> None:
         log.warning("graceful_shutdown_initiated")
         self._running = False
+
+        if self._ws_stream:
+            self._ws_stream.stop()
+        if self._liq_feed:
+            self._liq_feed.stop()
 
         for trade_id, info in list(self._open_trades.items()):
             side = "sell" if info["direction"] > 0 else "buy"
@@ -158,6 +209,9 @@ class ProductionBot:
             )
             log.info("emergency_close", trade_id=trade_id)
 
+        await self._notifier.send_kill_switch("graceful_shutdown", self._capital)
+        await self._notifier.close()
+        await self._store.close()
         await self._client.close()
         log.info("bot_stopped")
 
@@ -188,6 +242,12 @@ class ProductionBot:
 
             await asyncio.sleep(30)
 
+    def _on_ws_candle(self, candle: dict) -> None:
+        """Synchronous callback from BinanceCandleStream — schedule async work."""
+        self._adapter.feed_candle(candle)
+        self._last_candle_ts = candle["timestamp"]
+        asyncio.get_event_loop().create_task(self._on_candle_close(candle))
+
     async def _funding_oi_loop(self) -> None:
         symbol = self._cfg.trading.symbol
 
@@ -195,13 +255,66 @@ class ProductionBot:
             try:
                 fr = await self._client.fetch_funding_rate(symbol)
                 oi = await self._client.fetch_open_interest(symbol)
+                next_ts = await self._client.fetch_next_funding_time(symbol)
                 self._adapter.feed_funding(fr)
                 self._adapter.feed_oi(oi)
-                log.debug("funding_oi_updated", fr=fr, oi=oi)
+                self._adapter._buf.next_funding_ts_ms = next_ts
+                log.debug("funding_oi_updated", fr=fr, oi=oi, next_funding_ts=next_ts)
             except Exception as exc:
                 log.error("funding_oi_loop_error", error=str(exc))
 
             await asyncio.sleep(300)
+
+    async def _daily_report_loop(self) -> None:
+        """Fire a PnL report every day at the configured UTC hour."""
+        report_hour = self._cfg.notifications.daily_report_hour_utc
+
+        while self._running and not self._kill.triggered:
+            now = datetime.now(timezone.utc)
+            # Seconds until next report window
+            next_hour = now.replace(minute=0, second=0, microsecond=0)
+            if now.hour >= report_hour:
+                from datetime import timedelta
+                next_hour = next_hour.replace(hour=report_hour) + timedelta(days=1)
+            else:
+                next_hour = next_hour.replace(hour=report_hour)
+            wait_s = (next_hour - now).total_seconds()
+            await asyncio.sleep(wait_s)
+
+            try:
+                summary = await self._store.daily_summary()
+                total_pnl = (self._capital - self._start_capital) / (self._start_capital + 1e-10) * 100
+                max_dd = (self._peak_capital - self._capital) / (self._peak_capital + 1e-10) * 100
+                await self._notifier.send_daily_report(
+                    symbol=self._cfg.trading.symbol,
+                    starting_capital=self._start_capital,
+                    current_capital=self._capital,
+                    trades_today=summary.get("trades", 0),
+                    win_rate=summary.get("win_rate", 0.0),
+                    total_pnl_pct=total_pnl,
+                    max_drawdown_pct=max_dd,
+                )
+                self._start_capital = self._capital  # reset baseline for next day
+            except Exception as exc:
+                log.error("daily_report_error", error=str(exc))
+
+    async def _orderbook_loop(self) -> None:
+        """Poll L2 order book every 5 seconds to feed the OB imbalance signal."""
+        symbol = self._cfg.trading.symbol
+
+        while self._running and not self._kill.triggered:
+            try:
+                ob = await self._client.fetch_order_book(symbol, limit=20)
+                self._adapter._buf.ob_bids = ob.get("bids", [])
+                self._adapter._buf.ob_asks = ob.get("asks", [])
+                self._adapter._buf.ob_timestamp = int(time.time() * 1000)
+                log.debug("orderbook_updated",
+                          best_bid=ob["bids"][0][0] if ob.get("bids") else None,
+                          best_ask=ob["asks"][0][0] if ob.get("asks") else None)
+            except Exception as exc:
+                log.error("orderbook_loop_error", error=str(exc))
+
+            await asyncio.sleep(5)
 
     async def _position_monitor_loop(self) -> None:
         while self._running and not self._kill.triggered:
@@ -238,6 +351,11 @@ class ProductionBot:
                  direction=signal.direction, grade=signal.grade,
                  confidence=f"{signal.confidence:.3f}",
                  composite=f"{signal.composite:.3f}",
+                 trend=f"{signal.trend_score:.3f}",
+                 momentum=f"{signal.momentum_score:.3f}",
+                 orderflow=f"{signal.orderflow_score:.3f}",
+                 funding=f"{signal.funding_score:.3f}",
+                 orderbook=f"{signal.orderbook_score:.3f}",
                  vol_phase=signal.vol_phase, regime=signal.regime,
                  squeeze_fired=signal.squeeze_fired)
 
@@ -308,6 +426,21 @@ class ProductionBot:
                  entry=actual_entry, sl=signal.stop_loss, tp=signal.take_profit,
                  size_pct=f"{size_pct:.1%}")
 
+        rec = TradeRecord(
+            trade_id=trade_id, symbol=symbol, direction=direction,
+            entry_price=actual_entry, stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit, amount=amount,
+            size_pct=size_pct, grade=signal.grade,
+            confidence=signal.confidence,
+        )
+        await self._store.record_open(rec)
+        await self._notifier.send_trade_opened(
+            trade_id=trade_id, symbol=symbol, direction=signal.direction,
+            entry=actual_entry, stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit, size_pct=size_pct,
+            grade=signal.grade,
+        )
+
     async def _execute_exit(self, trade_id: str, exit_info: dict) -> None:
         if trade_id not in self._open_trades:
             return
@@ -339,6 +472,22 @@ class ProductionBot:
                      trade_id=trade_id, reason=exit_info["reason"],
                      exit=actual_exit, pnl_pct=f"{pnl_pct:+.3f}%",
                      capital=f"{self._capital:.2f}")
+
+            await self._store.record_close(
+                trade_id=trade_id,
+                exit_price=actual_exit,
+                pnl_pct=pnl_pct,
+                exit_reason=exit_info["reason"],
+                capital_after=self._capital,
+            )
+            direction_str = "LONG" if trade["direction"] > 0 else "SHORT"
+            await self._notifier.send_trade_closed(
+                trade_id=trade_id, symbol=self._cfg.trading.symbol,
+                direction=direction_str,
+                entry=trade["entry_price"], exit_price=actual_exit,
+                pnl_pct=pnl_pct, reason=exit_info["reason"],
+                capital=self._capital,
+            )
 
 
 # =============================================================================

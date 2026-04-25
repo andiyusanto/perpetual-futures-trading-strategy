@@ -95,3 +95,24 @@ class CCXTClient:
     async def fetch_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         symbols = [symbol] if symbol else None
         return await self.exchange.fetch_positions(symbols)
+
+    async def fetch_order_book(self, symbol: str, limit: int = 20) -> Dict[str, Any]:
+        """Fetch Level-2 order book snapshot. Returns {'bids': [...], 'asks': [...]}."""
+        return await self.exchange.fetch_order_book(symbol, limit)
+
+    async def fetch_next_funding_time(self, symbol: str) -> int:
+        """
+        Return the next funding settlement timestamp in milliseconds.
+        Falls back to the locally-computed Binance schedule if the exchange
+        does not expose this field.
+        """
+        try:
+            data = await self.exchange.fetch_funding_rate(symbol)
+            ts = data.get("nextFundingDatetime") or data.get("nextFundingTimestamp")
+            if ts:
+                return int(ts) if isinstance(ts, (int, float)) else int(ts) // 1000
+        except Exception:
+            pass
+
+        from src.risk.funding_carry import next_funding_timestamp_ms
+        return next_funding_timestamp_ms()

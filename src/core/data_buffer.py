@@ -6,7 +6,12 @@ Used exclusively by the production bot; the backtest feeds arrays directly.
 from __future__ import annotations
 
 from collections import deque
+from typing import TYPE_CHECKING
+
 import numpy as np
+
+if TYPE_CHECKING:
+    from src.execution.liquidation_feed import LiquidationEvent
 
 
 class RingBuffer:
@@ -61,6 +66,17 @@ class MarketDataBuffer:
         self.tick_sides: deque[int] = deque(maxlen=10_000)       # +1 buy / -1 sell
         self.tick_timestamps: deque[int] = deque(maxlen=10_000)
 
+        # Real liquidation events (populated by LiquidationFeed when live_liq_feed=True)
+        self.liquidation_events: deque[LiquidationEvent] = deque(maxlen=2_000)
+
+        # L2 order book snapshot (populated by _orderbook_loop every ~5 s)
+        self.ob_bids: list[list[float]] = []   # [[price, qty], ...] best-bid first
+        self.ob_asks: list[list[float]] = []   # [[price, qty], ...] best-ask first
+        self.ob_timestamp: int = 0             # ms epoch of last snapshot
+
+        # Next funding timestamp in ms (updated by _funding_oi_loop)
+        self.next_funding_ts_ms: int = 0
+
         self._last_candle_ts: int = 0
         self.bar_count: int = 0
 
@@ -91,6 +107,10 @@ class MarketDataBuffer:
         self.tick_volumes.append(qty)
         self.tick_sides.append(-1 if is_buyer_maker else 1)
         self.tick_timestamps.append(ts)
+
+    def update_liquidation(self, event: "LiquidationEvent") -> None:
+        """Append a real liquidation event from LiquidationFeed."""
+        self.liquidation_events.append(event)
 
     @property
     def ready(self) -> bool:

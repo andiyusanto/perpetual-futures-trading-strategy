@@ -20,7 +20,10 @@ from src.core.data_buffer import MarketDataBuffer
 from src.core.utils import compute_atr, compute_adx
 from src.core.volatility import VolatilityClassifier, VolatilityPhase
 from src.strategy.exits import MarketStructureSL, chandelier_update
-from src.strategy.signals import FundingVelocitySignal, LiquidationMapper, SignalEngineV3
+from src.risk.funding_carry import FundingCarryManager, next_funding_timestamp_ms
+from src.strategy.signals import (
+    FundingVelocitySignal, LiquidationMapper, OrderBookImbalanceSignal, SignalEngineV3,
+)
 
 
 # =============================================================================
@@ -46,6 +49,7 @@ class V3Signal:
     momentum_score: float = 0.0
     orderflow_score: float = 0.0
     funding_score: float = 0.0
+    orderbook_score: float = 0.0
     composite: float = 0.0
 
     # Context
@@ -99,6 +103,12 @@ class V3StrategyEngine:
         )
         self._liq_mapper = LiquidationMapper()
         self._structure_sl = MarketStructureSL()
+        self._ob_signal = OrderBookImbalanceSignal(levels=20)
+        self._carry_manager = FundingCarryManager(
+            threshold=getattr(cfg, "carry_threshold", 0.0005) if cfg else 0.0005,
+            hold_window_minutes=getattr(cfg, "carry_hold_minutes", 30) if cfg else 30,
+            exit_window_minutes=getattr(cfg, "carry_exit_minutes", 15) if cfg else 15,
+        )
 
         # Production-mode buffer (None in pure backtest usage)
         self._buffer: Optional[MarketDataBuffer] = None
@@ -124,6 +134,8 @@ class V3StrategyEngine:
         oi: np.ndarray,
         regime_type: str = "normal",
         regime_confidence: float = 0.6,
+        ob_bids: Optional[list] = None,
+        ob_asks: Optional[list] = None,
     ) -> V3Signal:
         """
         Main signal computation path. Called by backtest directly and by
@@ -141,20 +153,27 @@ class V3StrategyEngine:
             neutral.vol_phase = "compression"
             return neutral
 
-        # Step 2: Four orthogonal signals
+        # Step 2: Five orthogonal signals
         trend = self._sig_engine.trend_signal(c, h, l, v)
         momentum = self._sig_engine.momentum_signal(c, h, l, regime_type)
         orderflow = self._sig_engine.orderflow_signal(c, o, v)
-
         fr_signal, _, _ = self._funding_sig.compute(fr) if len(fr) >= 12 else (0.0, 0.0, 0.0)
 
-        # Step 3: Regime-weighted composite
-        w = self._sig_engine.get_regime_weights(regime_type)
+        ob_available = bool(ob_bids and ob_asks)
+        ob_score, _, _ = (
+            self._ob_signal.compute(ob_bids, ob_asks)  # type: ignore[arg-type]
+            if ob_available
+            else (0.0, 0.0, 0.0)
+        )
+
+        # Step 3: Regime-weighted composite (weights auto-renormalise when OB unavailable)
+        w = self._sig_engine.get_regime_weights(regime_type, ob_available=ob_available)
         composite = (
-            w["trend"] * trend
-            + w["momentum"] * momentum
+            w["trend"]     * trend
+            + w["momentum"]  * momentum
             + w["orderflow"] * orderflow
-            + w["funding"] * fr_signal
+            + w["funding"]   * fr_signal
+            + w["orderbook"] * ob_score
         )
 
         thr = self._cfg.composite_threshold
@@ -198,6 +217,8 @@ class V3StrategyEngine:
 
         # Step 7: Confluence — at least N signals must agree
         signs = [np.sign(trend), np.sign(momentum), np.sign(orderflow), np.sign(fr_signal)]
+        if ob_available:
+            signs.append(np.sign(ob_score))
         if sum(s == direction for s in signs if s != 0) < self._cfg.min_signal_agreement:
             return neutral
 
@@ -245,6 +266,7 @@ class V3StrategyEngine:
             momentum_score=momentum,
             orderflow_score=orderflow,
             funding_score=fr_signal,
+            orderbook_score=ob_score,
             composite=composite,
             vol_phase=vol_phase.value,
             squeeze_fired=squeeze_fired,
@@ -280,7 +302,12 @@ class V3StrategyEngine:
             regime = "normal"
             reg_conf = 0.6
 
-        return self.generate_signal_from_arrays(c, h, l, o, v, fr, oi, regime, reg_conf)
+        ob_bids = self._buffer.ob_bids if self._buffer.ob_bids else None
+        ob_asks = self._buffer.ob_asks if self._buffer.ob_asks else None
+
+        return self.generate_signal_from_arrays(
+            c, h, l, o, v, fr, oi, regime, reg_conf, ob_bids, ob_asks
+        )
 
     # ── Exit management ───────────────────────────────────────────────────────
 
@@ -337,6 +364,41 @@ class V3StrategyEngine:
             (pos["direction"] > 0 and current_high >= pos["take_profit"])
             or (pos["direction"] < 0 and current_low <= pos["take_profit"])
         )
+
+        # ── Carry override (before SL/TP check) ──────────────────────────────
+        if self._buffer is not None:
+            fr_now = float(self._buffer.funding_rate.last)
+            next_ts = (
+                self._buffer.next_funding_ts_ms
+                if self._buffer.next_funding_ts_ms > 0
+                else next_funding_timestamp_ms()
+            )
+
+            # Hold through favourable funding: suppress non-SL exits
+            if not hit_sl:
+                hold, hold_reason = self._carry_manager.should_hold_for_carry(
+                    pos["direction"], fr_now, next_ts
+                )
+                if hold:
+                    pos["_carry_hold"] = hold_reason
+                    return None  # suppress take-profit / time-based exit
+
+            # Early exit to avoid paying large funding
+            if not hit_sl and not hit_tp:
+                early_exit, early_reason = self._carry_manager.should_exit_before_funding(
+                    pos["direction"], fr_now, next_ts
+                )
+                if early_exit:
+                    mid = (current_high + current_low) / 2
+                    result = {
+                        "trade_id": trade_id,
+                        "reason": "funding_avoid",
+                        "exit_price": mid,
+                        "phase": phase,
+                        "use_maker": True,
+                    }
+                    del self._positions[trade_id]
+                    return result
 
         if hit_sl or hit_tp:
             result = {

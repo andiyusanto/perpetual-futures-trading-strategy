@@ -10,26 +10,31 @@ identically by the backtester and the live async bot.
 ## How the System Works
 
 APFTS v3 generates, filters, and manages directional trades on perpetual futures markets
-using four orthogonal signals combined with a volatility regime gate and liquidation-cluster
+using five orthogonal signals combined with a volatility regime gate and liquidation-cluster
 entry alignment.
 
 ### Architecture
 
 ```mermaid
 flowchart TD
-    WS["WebSocket / REST\nTrade + Candle Feed"]
-    BUF["MarketDataBuffer\nRing Buffers: OHLCV · FR · OI"]
+    WS["WebSocket / REST\nCandle · Tick · Liquidation Feed"]
+    OB["Order Book Loop\nL2 snapshot every 5 s"]
+    BUF["MarketDataBuffer\nRing Buffers: OHLCV · FR · OI · OB"]
     VOL["Volatility Phase Gate\nBollinger-Keltner Squeeze"]
-    SIG["4-Signal Composite\nTrend · Momentum · Orderflow · Funding Vel"]
-    LIQ["Liquidation Cluster Aligner\nSwing Points + OI Density"]
+    SIG["5-Signal Composite\nTrend · Momentum · Orderflow · Funding Vel · OB Imbalance"]
+    LIQ["Liquidation Cluster Aligner\nLive Feed + OI Density Model"]
     CONF["Confidence Grader\nA+ / A / B → trade  |  C / D → skip"]
+    CARRY["Funding Carry Manager\nHold through favourable FR / exit before paying"]
     RISK["Risk Gate\nKill Switch · Position Sizer · DD Check"]
     ENTRY["Limit Order Entry\nMaker Preference · Adaptive Offset"]
     POS["Open Position"]
     EXIT["4-Phase Chandelier Exit\nPhase 0 → 4 trailing stop"]
     EXEC["CCXT Executor\nAsync Order Management"]
+    STORE["SQLite TradeStore\nPersist every open/close"]
+    ALERT["AlertNotifier\nTelegram + Discord"]
 
     WS --> BUF
+    OB --> BUF
     BUF --> VOL
     VOL -- compression: SKIP --> BUF
     VOL -- expansion / normal --> SIG
@@ -39,8 +44,11 @@ flowchart TD
     RISK -- kill switch active: CLOSE ALL --> EXEC
     RISK --> ENTRY
     ENTRY --> POS
-    POS --> EXIT
+    POS --> CARRY
+    CARRY --> EXIT
     EXIT --> EXEC
+    EXEC --> STORE
+    EXEC --> ALERT
 ```
 
 ### Three Pillars
@@ -50,8 +58,8 @@ flowchart TD
 | Component | Purpose |
 |---|---|
 | Volatility Classifier | TTM Squeeze: skip compression (whipsaw), enter on expansion |
-| 4-Signal Composite | Trend + Momentum + Orderflow + Funding Velocity — weighted by regime |
-| Liquidation Mapper | Score entry alignment to nearby liq clusters; cascade amplifies your trade |
+| 5-Signal Composite | Trend + Momentum + Orderflow + Funding Velocity + OB Imbalance — regime-weighted |
+| Liquidation Mapper | Live `!forceOrder` events + OI-density model — score entry toward liq cascades |
 | Grading (A+/A/B/C) | Only trade B+ grades; C/D signals discarded |
 
 **Pillar 2 — Trade Management**
@@ -61,6 +69,7 @@ flowchart TD
 | Market-Structure SL | SL behind nearest swing point — tighter and more meaningful than fixed ATR |
 | 4-Phase Chandelier | Breakeven at +1R, trail 2.5x at +1.5R, tighten progressively to 1xATR at +4R |
 | Regime-Adaptive TP | 5x risk for trending regimes, 3x for mean-reverting |
+| Funding Carry Manager | Hold through favourable funding; early-exit before paying large rates |
 
 **Pillar 3 — Perpetual-Specific Edge**
 
@@ -68,6 +77,7 @@ flowchart TD
 |---|---|
 | Limit Entry Preference | Post-only orders save ~3.5 bp vs taker; adaptive offset by vol regime |
 | Funding Velocity Signal | Rate of change of funding rate — leading crowding indicator |
+| Order Book Imbalance | Level-2 proximity-weighted bid/ask pressure as 5th orthogonal signal |
 | Liquidation Magnet | Enter toward dense liq clusters; forced liquidations amplify the move |
 
 ---
@@ -83,43 +93,52 @@ flowchart TD
 - **Limit-order preference** — maker rebates built into the execution layer
 - **4-phase Chandelier** — non-linear trailing that captures full trends
 - **Market-structure SL** — swing-based stops, not fixed ATR multiples
-- **Funding velocity** — orthogonal 4th signal based on FR rate-of-change
-- **Liquidation cluster detection** — OI + swing-point model for entry timing
+- **Funding velocity** — orthogonal 5th signal based on FR rate-of-change
+- **Order book imbalance** — live L2 bid/ask pressure signal with wall detection
+- **Liquidation cluster detection** — real WS feed + OI model for entry timing
+- **Funding carry management** — hold/exit logic tied to the 8-hour settlement schedule
+- **WebSocket candle stream** — true push feed, ~50 ms latency vs 30 s REST polling
+- **Live liquidation feed** — real `!forceOrder@arr` events from Binance USDM
+- **Multi-symbol bot** — `apfts-multi-bot` runs parallel instances across symbol list
+- **Walk-forward optimiser** — `apfts-optimize` tunes parameters on rolling IS/OOS windows
+- **Telegram & Discord alerts** — real-time trade notifications + daily PnL reports
+- **SQLite trade persistence** — every open/close recorded; daily summary via async queries
+- **Docker deployment** — multi-stage image, `docker-compose` with Watchtower auto-update
 
 ---
 
 ## Installation & Setup
 
-### 1. Clone and install
+### Option A — Local Python
 
 ```bash
 git clone https://github.com/yourname/perpetual-futures-trading-strategy.git
 cd perpetual-futures-trading-strategy
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
+cp .env.example .env
+# edit .env with your API keys and desired settings
+apfts-bot
 ```
 
-### 2. Create your `.env`
+### Option B — Docker (recommended for production)
 
 ```bash
 cp .env.example .env
+# edit .env — set EXCHANGE_TESTNET=false only when ready for live trading
+
+# Build and start (single symbol)
+docker compose up -d
+
+# View logs
+docker compose logs -f apfts-bot
+
+# Stop
+docker compose down
 ```
 
-Edit `.env`:
-
-```dotenv
-EXCHANGE_ID=binanceusdm
-EXCHANGE_API_KEY=your_api_key_here
-EXCHANGE_API_SECRET=your_api_secret_here
-EXCHANGE_TESTNET=true          # Always start on testnet!
-
-TRADING_SYMBOL=BTC/USDT:USDT
-TRADING_LEVERAGE=5
-
-MAX_DRAWDOWN_PCT=15.0
-KILL_SWITCH_DRAWDOWN=20.0
-MAX_DAILY_LOSS_PCT=5.0
-```
+The container mounts `./data` and `./logs` as volumes so all trade records and
+logs survive container restarts.
 
 ---
 
@@ -157,13 +176,27 @@ python -m src.backtest.engine
   Total Return  : +8.91%
 ```
 
+### Walk-Forward Optimisation
+
+```bash
+# Default objective: Sharpe ratio
+apfts-optimize
+
+# Custom windows
+apfts-optimize --bars 20000 --in-sample 3000 --out-sample 1000 --step 500 --objective sharpe
+
+# Objectives: sharpe | expectancy | calmar
+apfts-optimize --objective calmar
+```
+
 ### Run the Live Bot
 
 ```bash
+# Single symbol (reads TRADING_SYMBOL from .env)
 apfts-bot
 
-# Or directly
-python -m src.production.bot
+# Multi-symbol (reads TRADING_SYMBOLS list from .env)
+apfts-multi-bot
 ```
 
 ### Run Tests
@@ -174,33 +207,69 @@ pytest tests/ -v
 
 ---
 
-## Configuration Options
+## Configuration Reference
 
-All options configurable via `.env` or environment variables.
+All settings are overridable via `.env` or environment variables.
+
+### Exchange
 
 | Variable | Default | Description |
 |---|---|---|
 | `EXCHANGE_ID` | `binanceusdm` | CCXT exchange ID |
 | `EXCHANGE_API_KEY` | — | Exchange API key |
 | `EXCHANGE_API_SECRET` | — | Exchange API secret |
+| `EXCHANGE_PASSPHRASE` | — | Required for OKX/Bybit |
 | `EXCHANGE_TESTNET` | `true` | Use sandbox/testnet |
-| `TRADING_SYMBOL` | `BTC/USDT:USDT` | Perpetual futures symbol |
+
+### Trading
+
+| Variable | Default | Description |
+|---|---|---|
+| `TRADING_SYMBOL` | `BTC/USDT:USDT` | Single-symbol mode |
+| `TRADING_SYMBOLS` | — | Comma-separated list for multi-bot |
 | `TRADING_LEVERAGE` | `5` | Leverage (1–20 recommended) |
+| `TRADING_TIMEFRAME` | `1m` | Candle timeframe |
+| `TRADING_USE_WEBSOCKET` | `false` | Replace REST polling with WS stream (Binance USDM) |
+| `TRADING_LIVE_LIQ_FEED` | `false` | Real liquidation events via WS (Binance USDM) |
+
+### Risk
+
+| Variable | Default | Description |
+|---|---|---|
 | `MAX_DRAWDOWN_PCT` | `15.0` | Soft drawdown limit |
 | `KILL_SWITCH_DRAWDOWN` | `20.0` | Hard stop — closes all positions |
 | `MAX_DAILY_LOSS_PCT` | `5.0` | Intraday loss limit |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
 
-Strategy parameters (edit `config/config.py`, `StrategyConfig`):
+### Notifications
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOTIFY_TELEGRAM_TOKEN` | — | Telegram Bot API token |
+| `NOTIFY_TELEGRAM_CHAT_ID` | — | Telegram chat / channel ID |
+| `NOTIFY_DISCORD_WEBHOOK_URL` | — | Discord incoming webhook URL |
+| `NOTIFY_NOTIFY_ON_TRADE` | `true` | Alert on every open/close |
+| `NOTIFY_NOTIFY_ON_PNL` | `true` | Send daily PnL report |
+| `NOTIFY_DAILY_REPORT_HOUR_UTC` | `0` | UTC hour to send daily report |
+
+### Database
+
+| Variable | Default | Description |
+|---|---|---|
+| `DB_ENABLED` | `true` | Persist trades to SQLite |
+| `DB_DB_PATH` | `data/trades.db` | SQLite file path |
+
+### Strategy Parameters (`config/config.py` → `StrategyConfig`)
 
 | Parameter | Default | Description |
 |---|---|---|
-| `composite_threshold` | `0.25` | Min composite to consider a trade |
-| `min_signal_agreement` | `2` | Minimum signals that must agree (of 4) |
+| `composite_threshold` | `0.25` | Min composite score to consider a trade |
+| `min_signal_agreement` | `2` | Minimum signals that must agree (of 5) |
 | `tp_mult_trending` | `5.0` | Take-profit multiple in trending regime |
 | `tp_mult_normal` | `3.0` | Take-profit multiple in mean-reverting regime |
 | `max_hold_bars` | `96` | Forced time-exit after N bars |
-| `limit_wait_bars` | `3` | Max bars to wait for limit fill |
+| `carry_threshold` | `0.0005` | Min \|FR\| to activate carry logic (0.05%) |
+| `carry_hold_minutes` | `30` | Hold window before favourable funding settlement |
+| `carry_exit_minutes` | `15` | Early-exit window before paying large funding |
 
 ---
 
@@ -211,16 +280,20 @@ Strategy parameters (edit `config/config.py`, `StrategyConfig`):
 1. **Trend Signal** — EMA8/21/55 stack (40%) + higher-high/higher-low structure (35%) + VWAP (25%)
 2. **Momentum Signal** — RSI with regime-adaptive thresholds (35%) + MACD histogram acceleration (35%) + price ROC velocity (30%)
 3. **Orderflow Signal** — CVD divergence (60%) + 10-bar buy/sell volume imbalance (40%)
-4. **Funding Velocity** — Counter-trend signal based on rate of change of funding rate; orthogonal to price
+4. **Funding Velocity** — counter-trend signal based on rate of change of funding rate
+5. **Order Book Imbalance** — proximity-weighted (1/(i+1)) bid vs ask depth; wall detection adjusts ±0.25
 
-### Regime-Adaptive Weights
+### Regime-Adaptive Weights (5 signals)
 
-| Regime | Trend | Momentum | Orderflow | Funding |
-|---|---|---|---|---|
-| Trending | 40% | 25% | 15% | 20% |
-| Mean-Reverting | 10% | 35% | 30% | 25% |
-| High-Vol | 20% | 20% | 35% | 25% |
-| Normal | 25% | 25% | 30% | 20% |
+| Regime | Trend | Momentum | Orderflow | Funding | OB |
+|---|---|---|---|---|---|
+| Trending | 32% | 22% | 14% | 17% | 15% |
+| Mean-Reverting | 8% | 28% | 24% | 20% | 20% |
+| High-Vol | 14% | 16% | 28% | 20% | 22% |
+| Normal | 20% | 20% | 24% | 18% | 18% |
+
+When no live order-book data is available (e.g. in backtest), `orderbook` weight is
+zeroed and the remaining four weights are renormalised to sum to 1.0.
 
 ### Entry Rules (all must pass)
 
@@ -228,7 +301,7 @@ Strategy parameters (edit `config/config.py`, `StrategyConfig`):
 2. Weighted composite signal > ±0.25
 3. Grade B or better (confidence > 0.20)
 4. Recent 6-bar volume > 30% of 720-bar mean
-5. At least 2 of 4 signals agree on direction
+5. At least 2 of 5 signals agree on direction
 6. At least 1 of the last 3 bars moves in signal direction
 7. Enter via limit order at adaptive offset; fall back to market if unfilled after 3 bars
 
@@ -241,8 +314,10 @@ Strategy parameters (edit `config/config.py`, `StrategyConfig`):
 | 2 | +1.5R reached | Chandelier trail at 2.5xATR |
 | 3 | +2.5R reached | Tighten trail to 1.5xATR |
 | 4 | +4.0R reached | Very tight trail at 1.0xATR |
-| — | Time | Market exit after `max_hold_bars` |
+| — | Funding carry hold | Suppress non-SL exit within 30 min of favourable settlement |
+| — | Funding avoid | Early limit-order exit 15 min before paying large rate |
 | — | Take-profit | Limit order at 3x–5x initial risk |
+| — | Time | Market exit after `max_hold_bars` |
 
 ### Risk Rules
 
@@ -250,6 +325,112 @@ Strategy parameters (edit `config/config.py`, `StrategyConfig`):
 - Kill switch auto-closes all positions at max drawdown threshold
 - Daily loss limit halts new trades for the day
 - Single-position mode by default (`max_open_trades=1`)
+
+---
+
+## Alerts & Notifications
+
+APFTS sends real-time messages to Telegram and/or Discord for every trade event.
+
+**Position opened:**
+```
+🟢 POSITION OPENED
+Symbol: BTC/USDT:USDT
+Direction: LONG | Grade: A+
+Entry:  65,420.00
+Stop:   64,890.00
+TP:     68,070.00  (5.0R)
+Size:   2.1% of equity
+ID:     a3f9b1c2
+```
+
+**Position closed:**
+```
+🟢 POSITION CLOSED
+Symbol: BTC/USDT:USDT
+Direction: LONG | Reason: take_profit
+Entry:  65,420.00
+Exit:   68,030.00
+PnL:    +3.991%
+Equity: 10,441.23 USDT
+ID:     a3f9b1c2
+```
+
+**Daily PnL report** (sent at `NOTIFY_DAILY_REPORT_HOUR_UTC`):
+```
+📈 DAILY PnL REPORT  2025-04-25 00:00 UTC
+Symbol:   BTC/USDT:USDT
+Equity:   10,441.23 USDT  (+4.41% vs start)
+Trades:   7 | Win rate: 71%
+Max DD:   1.23%
+```
+
+---
+
+## Database Schema
+
+All trades are stored in `data/trades.db` (SQLite):
+
+```sql
+trades (
+    trade_id      TEXT PRIMARY KEY,
+    symbol        TEXT,
+    direction     INTEGER,    -- +1 LONG / -1 SHORT
+    entry_price   REAL,
+    stop_loss     REAL,
+    take_profit   REAL,
+    amount        REAL,
+    size_pct      REAL,
+    grade         TEXT,
+    confidence    REAL,
+    open_ts       INTEGER,    -- ms epoch
+    close_ts      INTEGER,    -- NULL while open
+    exit_price    REAL,
+    pnl_pct       REAL,
+    exit_reason   TEXT,
+    capital_after REAL
+)
+```
+
+Query examples:
+
+```bash
+sqlite3 data/trades.db "SELECT trade_id, direction, pnl_pct, exit_reason FROM trades ORDER BY open_ts DESC LIMIT 20;"
+sqlite3 data/trades.db "SELECT AVG(pnl_pct), COUNT(*) FROM trades WHERE close_ts IS NOT NULL;"
+```
+
+---
+
+## Docker Deployment
+
+### Quick start
+
+```bash
+# Build the image
+docker compose build
+
+# Start bot + Watchtower (auto-restart + auto-update)
+docker compose up -d
+
+# Tail logs
+docker compose logs -f apfts-bot
+
+# Manual restart
+docker compose restart apfts-bot
+
+# Stop everything
+docker compose down
+```
+
+### Multi-symbol deployment
+
+Edit `docker-compose.yml` and uncomment `apfts-multi-bot`, then comment out `apfts-bot`.
+Set `TRADING_SYMBOLS=BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT` in `.env`.
+
+### Healthcheck
+
+The container runs a Python import health check every 30 seconds.
+`docker compose ps` will show `(healthy)` once the strategy engine loads successfully.
 
 ---
 
@@ -276,47 +457,61 @@ Risk of Ruin     Gambler's ruin estimate at 50% capital loss level
 
 ```
 perpetual-futures-trading-strategy/
+├── Dockerfile
+├── docker-compose.yml
+├── .dockerignore
 ├── pyproject.toml          # pip install -e .
 ├── requirements.txt
 ├── .env.example
 ├── config/
-│   └── config.py           # Pydantic BaseSettings
+│   └── config.py           # Pydantic BaseSettings (all config classes)
 ├── src/
 │   ├── core/
 │   │   ├── data_buffer.py  # RingBuffer + MarketDataBuffer
-│   │   ├── volatility.py   # VolatilityClassifier (canonical, shared)
+│   │   ├── volatility.py   # VolatilityClassifier (shared)
 │   │   └── utils.py        # ema, rsi, atr, adx
 │   ├── strategy/
-│   │   ├── signals.py      # FundingVelocitySignal, LiquidationMapper, SignalEngineV3
+│   │   ├── signals.py      # SignalEngineV3, FundingVelocitySignal,
+│   │   │                   # OrderBookImbalanceSignal, LiquidationMapper
 │   │   ├── exits.py        # ChandelierExit, MarketStructureSL
 │   │   └── engine.py       # V3StrategyEngine — shared by backtest + production
 │   ├── execution/
 │   │   ├── ccxt_client.py  # Async CCXT wrapper
-│   │   ├── order_manager.py# LimitOrderManager
-│   │   └── executor.py     # Order submit + retry
+│   │   ├── executor.py     # Order submit + retry
+│   │   ├── liquidation_feed.py  # Binance !forceOrder@arr WebSocket
+│   │   └── ws_stream.py    # Binance kline + aggTrade WebSocket
 │   ├── risk/
 │   │   ├── position_sizer.py
-│   │   ├── risk_manager.py # RegimeClassifier, RiskManager
-│   │   └── kill_switch.py  # Graceful shutdown + OS signal handler
+│   │   ├── risk_manager.py # RegimeClassifier
+│   │   ├── kill_switch.py
+│   │   └── funding_carry.py  # FundingCarryManager
 │   ├── backtest/
 │   │   ├── engine.py       # BacktestEngineV3 + synthetic data generator
-│   │   └── metrics.py      # TradeRecord, BacktestMetrics
+│   │   ├── metrics.py      # TradeRecord, BacktestMetrics
+│   │   └── optimizer.py    # WalkForwardOptimizer
+│   ├── notifications/
+│   │   └── notifier.py     # AlertNotifier (Telegram + Discord)
+│   ├── persistence/
+│   │   └── trade_store.py  # TradeStore (aiosqlite)
 │   └── production/
-│       └── bot.py          # Async bot (candle loop + position monitor)
+│       ├── bot.py          # Async production bot
+│       └── multi_bot.py    # Multi-symbol orchestrator
+├── data/                   # SQLite database (volume-mounted in Docker)
+├── logs/                   # Structured log files (volume-mounted in Docker)
 └── tests/
     └── test_strategy.py
 ```
 
 ---
 
-## Future Improvements
+## Emergency Procedures
 
-- **Live liquidation feed** — replace OI-model estimate with real exchange data (`/fapi/v1/forceOrders`)
-- **WebSocket candle stream** — replace REST polling with true WS subscription for lower latency
-- **Multi-symbol support** — run parallel instances across BTC/ETH/SOL perps
-- **Walk-forward optimisation** — automated parameter tuning on rolling windows
-- **Order book imbalance** — Level 2 bid-ask pressure as 5th orthogonal signal
-- **Funding carry management** — hold positions through favourable funding windows
-- **Telegram / Discord alerts** — real-time trade notifications and daily PnL reports
-- **Database persistence** — store all trades to SQLite / TimescaleDB
-- **Docker deployment** — containerised bot with auto-restart and health checks
+| Situation | Action |
+|---|---|
+| Runaway loss | Set `EXCHANGE_TESTNET=false` → kill switch triggers at `KILL_SWITCH_DRAWDOWN` |
+| Manual close all | `docker compose exec apfts-bot python -c "..."` or kill the container (shutdown handler closes all) |
+| Corrupt DB | Delete `data/trades.db` — bot recreates schema on next start |
+| Container crash loop | `docker compose logs apfts-bot` → check for auth errors or rate limits |
+
+**Remember**: This is real money. Always run on testnet first, confirm signals look reasonable,
+then switch `EXCHANGE_TESTNET=false`.
