@@ -499,24 +499,32 @@ def _configure_logging(level: str = "INFO", log_dir: str = "logs") -> None:
     import os
     os.makedirs(log_dir, exist_ok=True)
 
+    int_level = getattr(logging, level.upper(), logging.INFO)
+
     structlog.configure(
         processors=[
             structlog.stdlib.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.dev.ConsoleRenderer(),
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, level.upper(), logging.INFO)
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(int_level),
         logger_factory=structlog.PrintLoggerFactory(),
     )
 
-    file_handler = logging.FileHandler(f"{log_dir}/bot.log", mode="a")
-    file_handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s — %(message)s")
-    )
-    logging.getLogger().addHandler(file_handler)
-    logging.getLogger().setLevel(getattr(logging, level.upper(), logging.INFO))
+    root = logging.getLogger()
+    root.setLevel(int_level)
+
+    # Add file handler only once — avoid duplicates on repeated calls
+    log_path = f"{log_dir}/bot.log"
+    if not any(
+        isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(log_path)
+        for h in root.handlers
+    ):
+        file_handler = logging.FileHandler(log_path, mode="a")
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s — %(message)s")
+        )
+        root.addHandler(file_handler)
 
 
 def main() -> None:
