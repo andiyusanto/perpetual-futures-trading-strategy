@@ -135,7 +135,10 @@ class ShadowBot(ProductionBot):
             self._liq_feed.register_callback(self._adapter._buf.update_liquidation)
             tasks.append(asyncio.create_task(self._liq_feed.run()))
 
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            await self._client.close()
 
     async def _shutdown(self) -> None:
         log.warning("shadow_shutdown")
@@ -419,5 +422,6 @@ class ShadowBot(ProductionBot):
                     avg_slippage_bps=summary.get("avg_slip_bps", 0.0),
                 )
                 self._start_capital = self._capital
+                self._kill.reset_daily(self._capital)
             except Exception as exc:
                 log.error("shadow_daily_report_error", error=str(exc))

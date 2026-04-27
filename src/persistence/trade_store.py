@@ -133,6 +133,7 @@ class TradeStore:
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._db = await aiosqlite.connect(db_path)
         self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute(_CREATE_TABLE)
         await self._db.execute(_CREATE_IDX)
         await self._db.commit()
@@ -263,6 +264,7 @@ class ShadowTradeStore:
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self._db = await aiosqlite.connect(db_path)
         self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute(_CREATE_SHADOW_TABLE)
         await self._db.execute(_CREATE_SHADOW_IDX)
         await self._db.commit()

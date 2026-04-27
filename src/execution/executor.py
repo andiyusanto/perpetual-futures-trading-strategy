@@ -42,10 +42,11 @@ class OrderExecutor:
             return None
 
         order_id: str = order["id"]
-        deadline = asyncio.get_event_loop().time() + timeout_s
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
         poll_interval = 2.0
 
-        while asyncio.get_event_loop().time() < deadline:
+        while loop.time() < deadline:
             await asyncio.sleep(poll_interval)
             status = await self._retry(self._client.fetch_order, order_id, symbol)
             if status and status.get("status") == "closed":

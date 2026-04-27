@@ -74,7 +74,7 @@ class KillSwitch:
         self._reason = reason
         logger.critical("KILL SWITCH ACTIVATED — %s", reason)
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             loop.create_task(self._run_callbacks())
         except RuntimeError:
             pass
@@ -91,9 +91,8 @@ class KillSwitch:
 
     def _install_os_handlers(self) -> None:
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, lambda s=sig: self.trigger(f"{s.name} received"))
         except (NotImplementedError, RuntimeError):
-            # Windows or no running event loop
             pass

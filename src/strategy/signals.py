@@ -343,7 +343,9 @@ class SignalEngineV3:
             elif rh < ph and rl < pl:
                 ms_score = -1.0
 
-        vwap = np.cumsum(close * volume) / (np.cumsum(volume) + 1e-10)
+        lb_vwap = min(200, len(close))
+        vwap = (np.cumsum(close[-lb_vwap:] * volume[-lb_vwap:])
+                / (np.cumsum(volume[-lb_vwap:]) + 1e-10))
         vwap_score = 1.0 if close[-1] > vwap[-1] else -1.0
 
         return float(np.clip(0.40 * ema_score + 0.35 * ms_score + 0.25 * vwap_score, -1, 1))

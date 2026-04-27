@@ -99,7 +99,7 @@ class TradingConfig(BaseSettings):
         return (init_settings, env_settings, dotenv_settings, file_secret_settings)
 
     leverage: int = Field(3, description="Leverage multiplier — max 3x per position per CLAUDE.md")
-    timeframe: str = Field("1m", description="Candle timeframe")
+    timeframe: str = Field("5m", description="Candle timeframe")
     max_position_pct: float = Field(0.02, description="Max position as fraction of equity — 2% per CLAUDE.md")
     use_websocket: bool = Field(
         False,
@@ -122,9 +122,9 @@ class StrategyConfig(BaseSettings):
     ema_slow: int = 55
 
     # Signal gate
-    composite_threshold: float = 0.25
-    strong_threshold: float = 0.55
-    min_signal_agreement: int = 2       # out of 4 signals must agree
+    composite_threshold: float = 0.35
+    strong_threshold: float = 0.60
+    min_signal_agreement: int = 3       # out of 4 signals must agree
 
     # Volatility classifier (Bollinger / Keltner)
     bb_period: int = 20

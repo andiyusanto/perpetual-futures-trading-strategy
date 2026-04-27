@@ -362,13 +362,15 @@ class V3StrategyEngine:
             l = self._buffer.low.as_array()
             current_atr = float(np.mean(h[-14:] - l[-14:]))
 
-        new_stop, phase = chandelier_update(
-            pos["direction"], pos["entry_price"], pos["initial_risk"],
-            current_high, current_low, current_atr,
-            pos["stop_loss"], pos["highest"], pos["lowest"],
-        )
-        pos["stop_loss"] = new_stop
-        pos["trail_phase"] = phase
+        phase = pos["trail_phase"]
+        if current_atr > 0.0:
+            new_stop, phase = chandelier_update(
+                pos["direction"], pos["entry_price"], pos["initial_risk"],
+                current_high, current_low, current_atr,
+                pos["stop_loss"], pos["highest"], pos["lowest"],
+            )
+            pos["stop_loss"] = new_stop
+            pos["trail_phase"] = phase
 
         hit_sl = (
             (pos["direction"] > 0 and current_low <= pos["stop_loss"])

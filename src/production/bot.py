@@ -73,7 +73,7 @@ class V3BotAdapter:
 
     async def evaluate(self) -> V3Signal:
         async with self._lock:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, self._engine.generate_signal)
 
     def register_fill(
@@ -246,7 +246,7 @@ class ProductionBot:
         """Synchronous callback from BinanceCandleStream — schedule async work."""
         self._adapter.feed_candle(candle)
         self._last_candle_ts = candle["timestamp"]
-        asyncio.get_event_loop().create_task(self._on_candle_close(candle))
+        asyncio.get_running_loop().create_task(self._on_candle_close(candle))
 
     async def _funding_oi_loop(self) -> None:
         symbol = self._cfg.trading.symbol
@@ -294,7 +294,8 @@ class ProductionBot:
                     total_pnl_pct=total_pnl,
                     max_drawdown_pct=max_dd,
                 )
-                self._start_capital = self._capital  # reset baseline for next day
+                self._start_capital = self._capital
+                self._kill.reset_daily(self._capital)
             except Exception as exc:
                 log.error("daily_report_error", error=str(exc))
 

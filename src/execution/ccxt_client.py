@@ -110,7 +110,7 @@ class CCXTClient:
             data = await self.exchange.fetch_funding_rate(symbol)
             ts = data.get("nextFundingDatetime") or data.get("nextFundingTimestamp")
             if ts:
-                return int(ts) if isinstance(ts, (int, float)) else int(ts) // 1000
+                return int(ts) if isinstance(ts, (int, float)) else int(float(ts))
         except Exception:
             pass
 
